@@ -14,6 +14,7 @@ import {
   type ScriptPlan,
   type SegmentPlan,
 } from '../shared/api.js';
+import { themedDefaults, themeOf } from './themes.js';
 import { buildPart1Prompt, buildPart2Prompt, defaultVoice, STYLE_DEFAULTS } from './prompts.js';
 import { cleanText, isEnglish, languageName, normalizeLanguage } from './text.js';
 
@@ -53,6 +54,7 @@ export function sanitizeSettings(settings: GenerationSettings): GenerationSettin
   return {
     ...settings,
     style: settings.style === 'scientific' ? 'scientific' : 'ugc',
+    theme: themeOf(settings),
     imageMode: settings.imageMode === 'first_frame' ? 'first_frame' : 'reference',
     language: normalizeLanguage(settings.language),
     voiceHint: cleanText(settings.voiceHint, { max: FIELD_LIMITS.voice }),
@@ -124,7 +126,7 @@ function cleanSegment(raw: unknown, index: 1 | 2): Omit<SegmentPlan, 'prompt'> {
  */
 export function finalizePlan(plan: ScriptPlan, rawSettings: GenerationSettings): ScriptPlan {
   const settings = sanitizeSettings(rawSettings);
-  const d = STYLE_DEFAULTS[settings.style];
+  const d = themedDefaults(STYLE_DEFAULTS[settings.style], settings);
   const p = (plan && typeof plan === 'object' ? plan : {}) as Partial<ScriptPlan>;
   const segs: unknown[] = Array.isArray(p.segments) ? p.segments : [];
   const language = settings.language;
@@ -137,7 +139,11 @@ export function finalizePlan(plan: ScriptPlan, rawSettings: GenerationSettings):
   const draft: ScriptPlan = {
     source,
     character: cleanText(p.character, { max: FIELD_LIMITS.character }) || d.character,
-    setting: cleanText(p.setting, { max: FIELD_LIMITS.setting }) || d.setting,
+    // A theme fixes the location (brand consistency) unless the user edited the split themselves.
+    setting:
+      themeOf(settings) !== 'general' && source !== 'user'
+        ? d.setting
+        : cleanText(p.setting, { max: FIELD_LIMITS.setting }) || d.setting,
     voice:
       cleanText(p.voice, { max: FIELD_LIMITS.voice }) || settings.voiceHint || defaultVoice(settings.style, language),
     audio: cleanText(p.audio, { max: FIELD_LIMITS.audio }) || d.audio,

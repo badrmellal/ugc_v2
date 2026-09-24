@@ -4,6 +4,7 @@ import {
   LIMITS,
   RESOLUTIONS,
   VIDEO_STYLES,
+  VIDEO_THEMES,
   type AppConfigResponse,
   type PricingInfo,
 } from '../../shared/api.js';
@@ -37,6 +38,7 @@ export function registerConfigRoutes(app: FastifyInstance, deps: RouteDeps): voi
       limits: LIMITS,
       resolutions: RESOLUTIONS,
       styles: VIDEO_STYLES,
+      themes: VIDEO_THEMES,
       budget: {
         dailyLimitUsd: config.budget.dailyUsd,
         spentTodayUsd: round4(spend.spentUsd),

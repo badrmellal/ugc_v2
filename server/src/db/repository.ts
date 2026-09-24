@@ -83,7 +83,7 @@ export function mapGenerationRow(r: Row): GenerationRecord {
     completedAt: toDate(r.completed_at),
     title: r.title as string,
     script: r.script as string,
-    settings: r.settings as GenerationSettings,
+    settings: { theme: 'general', ...(r.settings as Partial<GenerationSettings>) } as GenerationSettings,
     plan: (r.plan as ScriptPlan | null) ?? null,
     characterImageKey: r.character_image_key as string,
     characterImageMime: r.character_image_mime as string,

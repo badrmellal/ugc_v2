@@ -7,6 +7,7 @@
  * deterministic splitter. Both paths end in `finalizePlan`, which rebuilds the prompts server-side.
  */
 import type { Logger } from 'pino';
+import { THEME_PRESETS, themedDefaults, themeOf } from './themes.js';
 import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { ScriptPlanner, ScriptSplitResult, TextModelClient, UsageInfo } from '../core/ports.js';
@@ -16,10 +17,12 @@ import {
   SPEAKING_SECONDS,
   SPEECH_WINDOWS,
   estimateSpokenSeconds,
+  THEME_LABELS,
   type GenerationSettings,
   type ScriptPlan,
 } from '../shared/api.js';
 import { fallbackPlan, parseScript } from './fallback.js';
+import { STYLE_DEFAULTS } from './prompts.js';
 import { finalizePlan, sanitizeSettings, wordsThatFit } from './finalize.js';
 import { checkVerbatim, cleanText, languageName } from './text.js';
 
@@ -147,10 +150,24 @@ export const SPLIT_SYSTEM_INSTRUCTION = [
   'Return only JSON that matches the schema.',
 ].join('\n');
 
+/** Theme context for the splitter: subject rules plus the default location, role and ambience. */
+function themeLines(s: GenerationSettings): string[] {
+  const theme = themeOf(s);
+  if (theme === 'general') return [];
+  const d = themedDefaults(STYLE_DEFAULTS[s.style], s);
+  return [
+    `Theme: ${THEME_LABELS[theme]}. ${THEME_PRESETS[theme].brief}`,
+    `Default setting for this theme (use it, adapted to the script, unless the script clearly calls for another place): ${d.setting}`,
+    `Default on-camera role for this theme: ${d.character}`,
+    `Default audio for this theme: ${d.audio}`,
+  ];
+}
+
 export function buildSplitPrompt(script: string, settings: GenerationSettings): string {
   const s = sanitizeSettings(settings);
   return [
     `Style: ${s.style}. ${STYLE_BRIEF[s.style]}`,
+    ...themeLines(s),
     `Spoken language: ${languageName(s.language)} (${s.language})`,
     `Voice direction from the user: ${s.voiceHint || 'none'}`,
     `Extra directions from the user: ${s.extraDirections || 'none'}`,

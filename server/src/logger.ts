@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { pino, stdSerializers, type Logger, type LoggerOptions } from 'pino';
 import type { AppConfig } from './config.js';
 
@@ -76,8 +77,18 @@ export function createErrorSerializer(config: AppConfig): (err: unknown) => unkn
   };
 }
 
+/** pino-pretty is a dev dependency: absent from the production image even when NODE_ENV=development. */
+function hasPinoPretty(): boolean {
+  try {
+    createRequire(import.meta.url).resolve('pino-pretty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createLogger(config: AppConfig, overrides: Partial<LoggerOptions> = {}): Logger {
-  const pretty = config.env === 'development' && Boolean(process.stdout.isTTY);
+  const pretty = config.env === 'development' && Boolean(process.stdout.isTTY) && hasPinoPretty();
 
   const options: LoggerOptions = {
     level: config.logLevel,

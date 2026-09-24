@@ -7,6 +7,7 @@
  * 3. Pick the split point that best balances estimated speaking time between the two 10s parts,
  *    preferring sentence boundaries, then clause boundaries, then word boundaries.
  */
+import { themedDefaults } from './themes.js';
 import { countWords, LIMITS, type GenerationSettings, type ScriptPlan } from '../shared/api.js';
 import { finalizePlan, sanitizeSettings } from './finalize.js';
 import { defaultVoice, STYLE_DEFAULTS } from './prompts.js';
@@ -441,7 +442,7 @@ function directionsToSegment(directions: string[]): { action: string; onScreenTe
 /** Deterministic split of a script into a finalized two-part plan (`source: 'fallback'`). */
 export function fallbackPlan(script: string, rawSettings: GenerationSettings): ScriptPlan {
   const settings = sanitizeSettings(rawSettings);
-  const d = STYLE_DEFAULTS[settings.style];
+  const d = themedDefaults(STYLE_DEFAULTS[settings.style], settings);
   const parsed = parseScript(script);
   const split = chooseSplit(parsed.units);
   const s1 = directionsToSegment(split.part1.directions);

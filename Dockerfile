@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
+# Base image. Override with --build-arg NODE_IMAGE=... (e.g. mirror.gcr.io/library/node:22-bookworm-slim
+# when Docker Hub rate limits pulls).
+ARG NODE_IMAGE=node:22-bookworm-slim
+
 # ---- dependencies (all, for building) ----------------------------------------
-FROM node:22-bookworm-slim AS deps
+FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY server/package.json server/
@@ -16,7 +20,7 @@ COPY web web
 RUN npm run build --workspace web && npm run build --workspace server
 
 # ---- production dependencies of the server only ------------------------------
-FROM node:22-bookworm-slim AS prod-deps
+FROM ${NODE_IMAGE} AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY server/package.json server/
@@ -24,7 +28,7 @@ COPY web/package.json web/
 RUN npm ci --omit=dev --workspace server --include-workspace-root=false --no-audit --no-fund
 
 # ---- runtime ---------------------------------------------------------------------
-FROM node:22-bookworm-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates tini \
   && rm -rf /var/lib/apt/lists/*

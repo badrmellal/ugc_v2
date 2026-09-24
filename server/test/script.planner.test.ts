@@ -334,7 +334,9 @@ describe('verbatim check with ambiguous parentheticals', () => {
     const plan = fallbackPlan('Here is the secret (she leans in) nobody tells you about sleep.', settings());
     expect(plan.segments[0].dialogue).toBe('Here is the secret nobody tells you about sleep.');
     expect(plan.segments[0].action).toBe('leans in');
-    expect(plan.segments[0].prompt).toContain('The person leans in. The person in <IMAGE_REF_0> says, with natural lip sync:');
+    expect(plan.segments[0].prompt).toContain(
+      'The person leans in. The person in <IMAGE_REF_0> says, with natural lip sync:',
+    );
   });
 
   it('writes several cues as one grammatical action sentence', () => {

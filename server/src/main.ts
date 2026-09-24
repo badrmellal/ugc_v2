@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import { closeAppContext, createAppContext, type AppContext } from './app-context.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { runMigrations } from './db/migrate.js';
+import { loadDotEnv } from './env-file.js';
 import { isAuthEnabled } from './http/auth.js';
 import { buildApp, buildHealthApp, resolveWebDist } from './http/app.js';
 import { createLogger } from './logger.js';
@@ -45,6 +46,7 @@ function logStartupSummary(config: AppConfig, logger: Logger): void {
 async function main(): Promise<void> {
   let config: AppConfig;
   try {
+    loadDotEnv();
     config = loadConfig();
   } catch (err) {
     // The logger depends on the configuration; report configuration errors plainly.

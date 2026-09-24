@@ -11,6 +11,7 @@ import {
   REGENERATION_MODES,
   RESOLUTIONS,
   VIDEO_STYLES,
+  VIDEO_THEMES,
   type GenerationSettings,
   type ScriptPlan,
 } from '../shared/api.js';
@@ -66,6 +67,7 @@ export const scriptSchema = text(LIMITS.scriptMaxChars).pipe(
 
 const settingsFields = {
   style: z.enum(VIDEO_STYLES),
+  theme: z.enum(VIDEO_THEMES),
   resolution: z.enum(RESOLUTIONS),
   imageMode: z.enum(IMAGE_MODES),
   language: languageSchema,
@@ -78,6 +80,7 @@ const settingsFields = {
 export const settingsSchema = z
   .object({
     style: settingsFields.style.default(DEFAULT_SETTINGS.style),
+    theme: settingsFields.theme.default(DEFAULT_SETTINGS.theme),
     resolution: settingsFields.resolution.default(DEFAULT_SETTINGS.resolution),
     imageMode: settingsFields.imageMode.default(DEFAULT_SETTINGS.imageMode),
     language: settingsFields.language.default(DEFAULT_SETTINGS.language),
@@ -92,6 +95,7 @@ export const settingsSchema = z
 /** Partial settings for regeneration edits: omitted fields keep the source generation's values. */
 export const settingsPatchSchema = z.object({
   style: settingsFields.style.optional(),
+  theme: settingsFields.theme.optional(),
   resolution: settingsFields.resolution.optional(),
   imageMode: settingsFields.imageMode.optional(),
   language: settingsFields.language.optional(),

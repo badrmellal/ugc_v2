@@ -43,7 +43,7 @@ export function deriveTitle(script: string): string {
 }
 
 /** Settings that change what is said or shown, and therefore require a new script split. */
-const SPLIT_AFFECTING: (keyof GenerationSettings)[] = ['style', 'language', 'voiceHint', 'extraDirections'];
+const SPLIT_AFFECTING: (keyof GenerationSettings)[] = ['style', 'theme', 'language', 'voiceHint', 'extraDirections'];
 
 function changedSettings(a: GenerationSettings, b: GenerationSettings): (keyof GenerationSettings)[] {
   return (Object.keys(a) as (keyof GenerationSettings)[]).filter((k) => a[k] !== b[k]);

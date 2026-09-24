@@ -43,6 +43,10 @@ test('generates, previews, downloads and regenerates a 20s video', async ({ page
   await page.getByLabel('Script (20 seconds)').fill(SCRIPT);
   await page.locator('input[type="file"]').setInputFiles(CHARACTER);
 
+  // Bandys Cars theme: the dealership setting flows into the split and both prompts.
+  await page.locator('label', { hasText: 'Bandys Cars' }).click();
+  await expect(page.getByRole('radio', { name: /Bandys Cars/ })).toBeChecked();
+
   // Optional split preview: two 10s parts with a shared continuity bible.
   await page.getByRole('button', { name: 'Preview split' }).click();
   await expect(page.getByText('Continuity bible', { exact: true })).toBeVisible();
@@ -63,6 +67,8 @@ test('generates, previews, downloads and regenerates a 20s video', async ({ page
   expect(dto.actualCost?.totalUsd).toBeGreaterThan(0);
   expect(dto.plan.segments).toHaveLength(2);
   expect(dto.plan.segments[1].prompt).toContain('Extend this video');
+  expect(dto.settings.theme).toBe('bandys_cars');
+  expect(dto.plan.setting).toContain('Bandys Cars');
 
   // Preview player shows the final video. Open-source Chromium builds cannot decode H.264/AAC
   // (Chrome, Safari, Edge and Firefox can); there the player must say so instead of failing silently.

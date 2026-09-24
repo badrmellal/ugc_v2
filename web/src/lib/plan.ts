@@ -45,6 +45,7 @@ export function planBasisKey(script: string, settings: GenerationSettings): stri
   return JSON.stringify({
     script: script.trim(),
     style: settings.style,
+    theme: settings.theme,
     language: settings.language.trim(),
     voiceHint: settings.voiceHint.trim(),
     extraDirections: settings.extraDirections.trim(),

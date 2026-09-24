@@ -32,15 +32,40 @@ Browser (React)  ──>  API (Fastify)  ──>  Postgres (jobs, history, ledge
 
 Each generation is both a history record and a job. Workers claim jobs with `FOR UPDATE SKIP LOCKED`, renew a lease with a heartbeat, and checkpoint every step (plan, uploaded image, interaction ids, stored videos). Gemini turns run in background mode and are polled, so a crash or deploy never loses a paid generation. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/API.md](docs/API.md).
 
-## Quick start (Docker)
+## Quick start on a Mac (Docker Desktop)
+
+You only need Docker Desktop running. Postgres, ffmpeg and Node all run inside the containers.
 
 ```bash
+git clone -b claude/ugc-video-generator-gemini-h31p3x https://github.com/badrmellal/ugc_v2.git
+cd ugc_v2
 cp .env.example .env
-# edit .env: GEMINI_API_KEY, APP_PASSWORD, SESSION_SECRET (openssl rand -base64 48)
+open -e .env            # set GEMINI_API_KEY=... (and APP_PASSWORD=... if you want a login screen)
 docker compose up --build
 ```
 
-Open http://localhost:8080, sign in with `APP_PASSWORD`, paste a script, upload a character image, and generate.
+Open http://localhost:8080 once the logs say `server ready`. The first build takes a few minutes; later starts take seconds.
+
+Then for each video:
+
+1. Pick a **Style** (UGC selfie or Scientific explainer) and a **Theme** (General, Bandys Cars, or Technology, AI & Robotics).
+2. Paste your 20-second script (about 40 spoken words) and drop in the character image.
+3. Optionally click **Preview split** to review or edit the two 10-second parts, then **Generate 20s video**.
+4. Watch the progress, preview the result, download the MP4, or regenerate the whole video or only part 2.
+
+Useful commands: `docker compose logs -f worker` (generation logs), `docker compose down` (stop), `docker compose down -v` (stop and delete all videos and history). The app only listens on localhost, so other devices on your network cannot use your API key. Want to try it without spending anything? Set `GEMINI_MOCK=true` in `.env`: videos are then synthesized locally and Google is never called.
+
+## Themes
+
+Themes are independent of the style and control the location, the on-camera role and the ambience. The script splitter also gets subject rules for each theme.
+
+| Theme                     | UGC style                                                         | Scientific style                                     | Rules                                                                                |
+| ------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| General                   | Home interior, natural light                                      | Clean modern lab                                     | Follows the script                                                                   |
+| Bandys Cars               | Sunny dealership lot, polished cars, a sign reading "Bandys Cars" | Bright Bandys Cars showroom                          | Generic cars with no third-party logos; never invents makes, models, prices or specs |
+| Technology, AI & Robotics | Tech desk with monitors, a small robot arm, LED lighting          | Robotics lab with a robotic arm and a humanoid robot | Never invents specs, benchmarks, dates or product names                              |
+
+A themed video always uses the theme's location unless you edit it in **Preview split**. To change a theme's wording, edit `server/src/script/themes.ts`.
 
 ## Local development
 

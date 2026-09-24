@@ -1,4 +1,4 @@
-import { FlaskConical, Smartphone } from 'lucide-react';
+import { Bot, CarFront, FlaskConical, Shapes, Smartphone } from 'lucide-react';
 import { useId, useState, type ReactNode } from 'react';
 import {
   LIMITS,
@@ -8,6 +8,7 @@ import {
   type PricingInfo,
   type Resolution,
   type VideoStyle,
+  type VideoTheme,
 } from '@shared/api';
 import { formatUsd } from '../lib/format';
 import {
@@ -15,6 +16,7 @@ import {
   LANGUAGES,
   RESOLUTION_LABELS,
   STYLE_OPTIONS,
+  THEME_OPTIONS,
   isKnownLanguage,
   pricePerVideo,
 } from '../lib/options';
@@ -25,6 +27,12 @@ import { Field, describedBy, inputClass } from './Field';
 import { SegmentedControl, type SegmentOption } from './SegmentedControl';
 
 type Patch = Partial<GenerationSettings>;
+
+const THEME_ICONS: Record<VideoTheme, ReactNode> = {
+  general: <Shapes className="size-4 shrink-0" aria-hidden="true" />,
+  bandys_cars: <CarFront className="size-4 shrink-0" aria-hidden="true" />,
+  tech_ai_robotics: <Bot className="size-4 shrink-0" aria-hidden="true" />,
+};
 
 const STYLE_ICONS: Record<VideoStyle, ReactNode> = {
   ugc: <Smartphone className="size-4 shrink-0" aria-hidden="true" />,
@@ -50,6 +58,12 @@ export function SettingsPanel({
     description: option.description,
     icon: STYLE_ICONS[option.value],
   }));
+  const themeOptions: SegmentOption<VideoTheme>[] = THEME_OPTIONS.map((option) => ({
+    value: option.value,
+    label: option.label,
+    description: option.description,
+    icon: THEME_ICONS[option.value],
+  }));
   const imageModeOptions: SegmentOption<ImageMode>[] = IMAGE_MODE_OPTIONS.map((option) => ({ ...option }));
 
   return (
@@ -61,6 +75,14 @@ export function SettingsPanel({
         value={settings.style}
         options={styleOptions}
         onChange={(style) => onChange({ style })}
+      />
+      <SegmentedControl
+        name="theme"
+        legend="Theme"
+        layout="cards"
+        value={settings.theme ?? 'general'}
+        options={themeOptions}
+        onChange={(theme) => onChange({ theme })}
       />
       <ResolutionPicker
         value={settings.resolution}

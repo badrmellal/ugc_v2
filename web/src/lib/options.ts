@@ -1,18 +1,28 @@
 /** UI copy and option lists for generation settings. */
 import {
   SEGMENT_SECONDS,
+  THEME_DESCRIPTIONS,
+  THEME_LABELS,
   TOTAL_SECONDS,
+  VIDEO_THEMES,
   type GenerationSettings,
   type ImageMode,
   type PricingInfo,
   type Resolution,
   type VideoStyle,
+  type VideoTheme,
 } from '@shared/api';
 
 export const STYLE_OPTIONS: ReadonlyArray<{ value: VideoStyle; label: string; description: string }> = [
   { value: 'ugc', label: 'UGC', description: 'Handheld selfie-style creator talking to camera.' },
   { value: 'scientific', label: 'Scientific', description: 'Clear explainer presenter with a lab or studio look.' },
 ];
+
+export const THEME_OPTIONS: ReadonlyArray<{ value: VideoTheme; label: string; description: string }> = VIDEO_THEMES.map(
+  (value) => ({ value, label: THEME_LABELS[value], description: THEME_DESCRIPTIONS[value] }),
+);
+
+export { THEME_LABELS };
 
 export const IMAGE_MODE_OPTIONS: ReadonlyArray<{ value: ImageMode; label: string; description: string }> = [
   {
@@ -111,6 +121,7 @@ export function isValidLanguageTag(tag: string): boolean {
 export function settingsSummary(settings: GenerationSettings): string {
   return [
     STYLE_LABELS[settings.style],
+    ...(settings.theme && settings.theme !== 'general' ? [THEME_LABELS[settings.theme]] : []),
     RESOLUTION_LABELS[settings.resolution],
     IMAGE_MODE_LABELS[settings.imageMode],
     languageLabel(settings.language),

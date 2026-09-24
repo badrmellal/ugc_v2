@@ -8,6 +8,25 @@
 export const VIDEO_STYLES = ['ugc', 'scientific'] as const;
 export type VideoStyle = (typeof VIDEO_STYLES)[number];
 
+/**
+ * Content theme, independent of the delivery style: it sets the default location, the on-camera role
+ * and the ambience, and gives the script splitter subject-specific rules.
+ */
+export const VIDEO_THEMES = ['general', 'bandys_cars', 'tech_ai_robotics'] as const;
+export type VideoTheme = (typeof VIDEO_THEMES)[number];
+
+export const THEME_LABELS: Record<VideoTheme, string> = {
+  general: 'General',
+  bandys_cars: 'Bandys Cars',
+  tech_ai_robotics: 'Technology, AI & Robotics',
+};
+
+export const THEME_DESCRIPTIONS: Record<VideoTheme, string> = {
+  general: 'No preset: the scene follows your script.',
+  bandys_cars: 'Car dealership: lot or showroom with a Bandys Cars sign, walkarounds, deals and test drives.',
+  tech_ai_robotics: 'Tech studio or robotics lab: AI tools, gadgets, robots and automation.',
+};
+
 export const RESOLUTIONS = ['360p', '720p', '1080p', '4k'] as const;
 export type Resolution = (typeof RESOLUTIONS)[number];
 
@@ -83,6 +102,7 @@ export const LIMITS = {
 
 export interface GenerationSettings {
   style: VideoStyle;
+  theme: VideoTheme;
   resolution: Resolution;
   imageMode: ImageMode;
   /** BCP-47 language tag for the spoken dialogue, e.g. `en`, `fr`, `ar`. */
@@ -266,6 +286,7 @@ export interface AppConfigResponse {
   limits: typeof LIMITS;
   resolutions: readonly Resolution[];
   styles: readonly VideoStyle[];
+  themes: readonly VideoTheme[];
   budget: {
     dailyLimitUsd: number | null;
     spentTodayUsd: number;
@@ -290,6 +311,7 @@ export interface ApiErrorBody {
 
 export const DEFAULT_SETTINGS: GenerationSettings = {
   style: 'ugc',
+  theme: 'general',
   resolution: '720p',
   imageMode: 'reference',
   language: 'en',
