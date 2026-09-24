@@ -73,6 +73,14 @@ const FONT_CANDIDATES = [
   '/System/Library/Fonts/Supplemental/Arial.ttf',
 ];
 
+/**
+ * Demuxers accepted for video/image inputs. Anything else (HLS playlists, concat lists, text rendered
+ * as video, ...) is refused, and inputs may only be read through the `file` protocol.
+ */
+const INPUT_FORMAT_WHITELIST =
+  'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,mpegts,avi,image2,jpeg_pipe,png_pipe,webp_pipe,mjpeg';
+const INPUT_GUARD = ['-format_whitelist', INPUT_FORMAT_WHITELIST, '-protocol_whitelist', 'file'];
+
 /** Paths that can be embedded in a filtergraph option without any escaping. */
 const FILTER_SAFE_PATH = /^[A-Za-z0-9/_.-]+$/;
 /** Pixel formats that carry an alpha channel (or a palette that may be transparent). */
@@ -156,12 +164,12 @@ export class FfmpegMediaTools implements MediaTools {
     const src = path.resolve(input);
     await this.writeOutput(output, async (tmp) => {
       try {
-        await this.ffmpeg(['-i', src, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', ...mp4Out(tmp)]);
+        await this.ffmpeg([...INPUT_GUARD, '-i', src, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', ...mp4Out(tmp)]);
       } catch (err) {
         if (!isRecoverable(err)) throw err;
         // Stream copy fails for codecs the MP4 muxer rejects or broken timestamps: re-encode instead.
         await rm(tmp, { force: true });
-        await this.ffmpeg(['-i', src, '-map', '0:v:0', '-map', '0:a:0?', ...h264Aac(), ...mp4Out(tmp)]);
+        await this.ffmpeg([...INPUT_GUARD, '-i', src, '-map', '0:v:0', '-map', '0:a:0?', ...h264Aac(), ...mp4Out(tmp)]);
       }
     });
   }
@@ -204,7 +212,7 @@ export class FfmpegMediaTools implements MediaTools {
 
     await this.writeOutput(output, (tmp) =>
       this.ffmpeg([
-        ...sources.flatMap((s) => ['-i', s]),
+        ...sources.flatMap((s) => [...INPUT_GUARD, '-i', s]),
         '-filter_complex',
         parts.join(';'),
         '-map',
@@ -235,6 +243,7 @@ export class FfmpegMediaTools implements MediaTools {
         const last = index === positions.length - 1;
         try {
           await this.ffmpeg([
+            ...INPUT_GUARD,
             '-ss',
             t.toFixed(3),
             '-i',
@@ -273,7 +282,9 @@ export class FfmpegMediaTools implements MediaTools {
     // A fixed image demuxer: never let ffmpeg probe untrusted uploads as playlists or other containers.
     const demuxer = `${format}_pipe`;
 
-    const json = await this.ffprobeJson([
+    const { data: json, stderr } = await this.ffprobeRaw([
+      '-protocol_whitelist',
+      'file',
       '-f',
       demuxer,
       '-max_pixels',
@@ -288,14 +299,16 @@ export class FfmpegMediaTools implements MediaTools {
     ]);
     const stream = json.streams?.[0];
     const frame = json.frames?.[0];
-    if (!stream?.width || !stream.height) throw new MediaError('invalid_media', 'Image could not be decoded');
-    if (stream.width * stream.height > this.maxImagePixels) {
-      throw new MediaError(
-        'image_too_large',
-        `Image is ${stream.width}x${stream.height}, above the ${this.maxImagePixels} pixel limit`,
-      );
+    const tooLarge = /Picture size (\d+x\d+) exceeds specified max pixel count/.exec(stderr);
+    if (tooLarge || (stream?.width && stream.height && stream.width * stream.height > this.maxImagePixels)) {
+      const size = tooLarge?.[1] ?? `${stream?.width}x${stream?.height}`;
+      throw new MediaError('image_too_large', `Image is ${size}, above the ${this.maxImagePixels} pixel limit`, {
+        stderr,
+      });
     }
-    if (!frame) throw new MediaError('invalid_media', 'Image could not be decoded');
+    if (!stream?.width || !stream.height || !frame) {
+      throw new MediaError('invalid_media', 'Image could not be decoded', { stderr });
+    }
 
     const orientation = readOrientation(frame, stream);
     const swap = orientation >= 5 && orientation <= 8;
@@ -323,6 +336,8 @@ export class FfmpegMediaTools implements MediaTools {
       this.ffmpeg([
         // Orientation is applied explicitly above, identically on every ffmpeg version.
         '-noautorotate',
+        '-protocol_whitelist',
+        'file',
         '-f',
         demuxer,
         '-max_pixels',
@@ -390,12 +405,16 @@ export class FfmpegMediaTools implements MediaTools {
       const font = await this.resolveFont();
 
       const videoInput = image
-        ? ['-loop', '1', '-framerate', String(SYNTH_FPS), '-t', d, '-i', image]
+        ? ['-i', image]
         : ['-f', 'lavfi', '-i', `testsrc2=size=${width}x${height}:rate=${SYNTH_FPS}:duration=${d}`];
-      // Fill the frame with the image at 115% and pan diagonally across it, so the clip visibly moves.
+      // Scale the image once to 115% of the frame, repeat that frame for the whole clip and pan
+      // diagonally across it, so the clip visibly moves (decoding the image per frame is ~6x slower).
+      const frames = Math.max(1, Math.round(durationSec * SYNTH_FPS));
+      const coverW = evenFloor(width * 1.15);
+      const coverH = evenFloor(height * 1.15);
       const base = image
-        ? `[0:v]scale=${evenFloor(width * 1.15)}:${evenFloor(height * 1.15)}:force_original_aspect_ratio=increase,` +
-          `crop=${evenFloor(width * 1.15)}:${evenFloor(height * 1.15)},` +
+        ? `[0:v]scale=${coverW}:${coverH}:force_original_aspect_ratio=increase,crop=${coverW}:${coverH},` +
+          `loop=loop=${frames - 1}:size=1:start=0,setpts=N/(${SYNTH_FPS}*TB),` +
           `crop=${width}:${height}:x='(iw-ow)*t/${d}':y='(ih-oh)*t/${d}',setsar=1,format=yuv420p`
         : `[0:v]setsar=1,format=yuv420p`;
       const fontSize = Math.max(12, Math.round(width / 20));
@@ -467,7 +486,12 @@ export class FfmpegMediaTools implements MediaTools {
 
   private async probeDetailed(input: string): Promise<DetailedProbe> {
     await assertInputFile(input);
-    const json = await this.ffprobeJson(['-show_format', '-show_streams', path.resolve(input)]);
+    const { data: json } = await this.ffprobeRaw([
+      ...INPUT_GUARD,
+      '-show_format',
+      '-show_streams',
+      path.resolve(input),
+    ]);
     const streams = json.streams ?? [];
     if (streams.length === 0) throw new MediaError('invalid_media', `${path.basename(input)} has no media streams`);
 
@@ -500,7 +524,7 @@ export class FfmpegMediaTools implements MediaTools {
     };
   }
 
-  private async ffprobeJson(args: string[]): Promise<FfprobeOutput> {
+  private async ffprobeRaw(args: string[]): Promise<{ data: FfprobeOutput; stderr: string }> {
     let result: RunResult;
     try {
       result = await this.run(this.ffprobePath, ['-v', 'error', '-print_format', 'json', ...args]);
@@ -515,7 +539,7 @@ export class FfmpegMediaTools implements MediaTools {
       throw err;
     }
     try {
-      return JSON.parse(result.stdout.toString('utf8')) as FfprobeOutput;
+      return { data: JSON.parse(result.stdout.toString('utf8')) as FfprobeOutput, stderr: result.stderr };
     } catch (err) {
       throw new MediaError('invalid_media', 'ffprobe returned invalid JSON', { stderr: result.stderr, cause: err });
     }

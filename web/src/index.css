@@ -1,0 +1,160 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens. Components use the semantic utilities generated from these
+ * (bg-canvas, bg-surface, text-muted, border-line, bg-accent, text-ok...), so
+ * light and dark mode are handled here only.
+ */
+:root {
+  color-scheme: light dark;
+
+  --c-canvas: #f6f6f8;
+  --c-surface: #ffffff;
+  --c-surface-2: #f0f0f4;
+  --c-surface-3: #e6e6ec;
+  --c-line: #e3e3ea;
+  --c-line-strong: #cfcfd9;
+  --c-fg: #16161d;
+  --c-muted: #5d5d6b;
+  --c-subtle: #8a8a99;
+
+  --c-accent: #5b3df5;
+  --c-accent-hover: #4c2fe0;
+  --c-accent-fg: #ffffff;
+  --c-accent-soft: #eeeaff;
+  --c-accent-text: #4a2fd6;
+
+  --c-ok: #15803d;
+  --c-ok-soft: #e7f6ec;
+  --c-warn: #b45309;
+  --c-warn-soft: #fdf3e2;
+  --c-danger: #c62828;
+  --c-danger-soft: #fdecec;
+  --c-info: #1d64c9;
+  --c-info-soft: #e8f0fc;
+
+  --c-frame: #111117;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-canvas: #0d0d12;
+    --c-surface: #16161d;
+    --c-surface-2: #1e1e27;
+    --c-surface-3: #2a2a35;
+    --c-line: #2a2a35;
+    --c-line-strong: #3a3a48;
+    --c-fg: #ececf2;
+    --c-muted: #a3a3b3;
+    --c-subtle: #767688;
+
+    --c-accent: #7c63ff;
+    --c-accent-hover: #917bff;
+    --c-accent-fg: #ffffff;
+    --c-accent-soft: #231c46;
+    --c-accent-text: #b3a5ff;
+
+    --c-ok: #4ade80;
+    --c-ok-soft: #12291b;
+    --c-warn: #fbbf24;
+    --c-warn-soft: #2e2410;
+    --c-danger: #f87171;
+    --c-danger-soft: #331618;
+    --c-info: #60a5fa;
+    --c-info-soft: #14233a;
+
+    --c-frame: #2c2c38;
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--c-canvas);
+  --color-surface: var(--c-surface);
+  --color-surface-2: var(--c-surface-2);
+  --color-surface-3: var(--c-surface-3);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-fg: var(--c-fg);
+  --color-muted: var(--c-muted);
+  --color-subtle: var(--c-subtle);
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-accent-fg: var(--c-accent-fg);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-accent-text: var(--c-accent-text);
+  --color-ok: var(--c-ok);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-warn: var(--c-warn);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-danger: var(--c-danger);
+  --color-danger-soft: var(--c-danger-soft);
+  --color-info: var(--c-info);
+  --color-info-soft: var(--c-info-soft);
+  --color-frame: var(--c-frame);
+}
+
+@theme {
+  --animate-shimmer: shimmer 2.2s ease-in-out infinite;
+  --animate-toast-in: toast-in 180ms ease-out;
+
+  @keyframes shimmer {
+    0% {
+      transform: translateY(-100%);
+    }
+    100% {
+      transform: translateY(100%);
+    }
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--c-canvas);
+    color: var(--c-fg);
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      'Helvetica Neue',
+      Arial,
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--c-accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--c-accent-soft);
+  }
+
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  summary {
+    cursor: pointer;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+}
