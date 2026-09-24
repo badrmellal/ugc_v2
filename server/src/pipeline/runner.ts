@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
@@ -16,6 +16,7 @@ import {
   type VideoTurnRequest,
 } from '../core/ports.js';
 import type { GenerationRepository } from '../db/repository.js';
+import { unlimitedTurns, type TurnLimiter } from '../db/turn-limiter.js';
 import { actualCost, estimateCost, turnCostFromUsage } from '../pricing/pricing.js';
 import { SEGMENT_SECONDS, type GenerationStage } from '../shared/api.js';
 import { generationKeys } from '../storage/index.js';
@@ -37,6 +38,8 @@ export interface PipelineDeps {
   storage: StorageDriver;
   media: MediaTools;
   logger: Logger;
+  /** Cluster-wide cap on concurrent Omni turns. Defaults to unlimited. */
+  turnLimiter?: TurnLimiter;
   /** Parent directory for per-job scratch space. Defaults to the OS temp dir. */
   workRoot?: string;
   /** Injectable clock/sleep for tests. */
@@ -66,6 +69,13 @@ const MAX_POLL_ERRORS = 6;
 const FULL_OUTPUT_MIN_RATIO = 1.5;
 
 type TurnKind = 'part1' | 'part2';
+
+/** Extra polls when a turn completes without a video before treating it as blocked. */
+const EMPTY_OUTPUT_RECHECKS = 3;
+
+function hasVideo(state: InteractionState): boolean {
+  return Boolean(state.video && (state.video.uri || state.video.inlineData));
+}
 
 export class GenerationPipeline {
   private readonly now: () => number;
@@ -214,7 +224,8 @@ class JobRun {
     let assembly: 'model_full' | 'concatenated';
     if (p2.durationSec >= p1.durationSec * FULL_OUTPUT_MIN_RATIO) {
       assembly = 'model_full';
-      await media.faststart(part2, finalLocal);
+      // Keep Google's original bytes (no remux) so embedded provenance metadata is preserved.
+      await copyFile(part2, finalLocal);
     } else {
       assembly = 'concatenated';
       await this.event(
@@ -260,8 +271,30 @@ class JobRun {
   // Omni turns
   // -------------------------------------------------------------------------
 
-  /** Creates (or resumes) one Omni turn and waits for a terminal state. */
+  /** Runs one Omni turn while holding a cluster-wide turn slot. */
   private async runTurn(kind: TurnKind, req: VideoTurnRequest): Promise<InteractionState> {
+    const limiter = this.deps.turnLimiter ?? unlimitedTurns;
+    const waitStart = this.now();
+    const acquire = limiter.acquire(this.ctx.signal);
+    const slow = setTimeout(() => {
+      void this.event('info', 'Waiting for a free Gemini slot (another video is generating)');
+    }, 3000);
+    let release: () => Promise<void>;
+    try {
+      release = await acquire;
+    } finally {
+      clearTimeout(slow);
+    }
+    const waitedMs = this.now() - waitStart;
+    try {
+      return await this.runTurnLocked(kind, req, waitedMs);
+    } finally {
+      await release();
+    }
+  }
+
+  /** Creates (or resumes) one Omni turn and waits for a terminal state. */
+  private async runTurnLocked(kind: TurnKind, req: VideoTurnRequest, waitedMs: number): Promise<InteractionState> {
     const { video, config } = this.deps;
     const idField = kind === 'part1' ? 'part1InteractionId' : 'part2InteractionId';
     const statusField = kind === 'part1' ? 'part1Status' : 'part2Status';
@@ -312,7 +345,7 @@ class JobRun {
     this.inFlightInteraction = state.id;
 
     const stageStart = this.g.stageStartedAt?.getTime() ?? this.now();
-    const deadline = stageStart + config.gemini.turnTimeoutMs;
+    const deadline = stageStart + waitedMs + config.gemini.turnTimeoutMs;
     let pollErrors = 0;
     while (state.status === 'in_progress') {
       await this.sleep(config.gemini.pollIntervalMs, this.ctx.signal);
@@ -342,6 +375,13 @@ class JobRun {
       }
       await this.touchProgress();
     }
+    // The output can lag behind the completed status: re-check a few times before failing.
+    for (let i = 0; i < EMPTY_OUTPUT_RECHECKS && state.status === 'completed' && !hasVideo(state); i += 1) {
+      await this.sleep(config.gemini.pollIntervalMs, this.ctx.signal);
+      this.throwIfStopped();
+      const current: InteractionState = state;
+      state = await video.getInteraction(current.id).catch(() => current);
+    }
     this.inFlightInteraction = null;
 
     const usageCost = turnCostFromUsage(this.deps.config.pricing, state.usage);
@@ -357,7 +397,7 @@ class JobRun {
     });
 
     if (state.status === 'completed') {
-      if (!state.video || (!state.video.uri && !state.video.inlineData)) {
+      if (!hasVideo(state)) {
         await this.checkpoint({ [statusField]: 'failed' } as GenerationPatch);
         throw new StepError(
           'empty_output',

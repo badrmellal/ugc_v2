@@ -57,6 +57,17 @@ export type RegenerationMode = (typeof REGENERATION_MODES)[number];
 
 export const SEGMENT_SECONDS = 10;
 export const TOTAL_SECONDS = 20;
+/**
+ * Seconds of speech that fit comfortably in one 20s video: each 10s part speaks for about 7.5s so that
+ * roughly 2 seconds of silence surround the seam between part 1 and the extension (Omni regenerates the
+ * last frames of part 1, and speech crossing the seam tends to get rewritten). About 40 words.
+ */
+export const SPEAKING_SECONDS = 15;
+/** Speaking windows inside each part, in seconds relative to the start of that part. */
+export const SPEECH_WINDOWS = {
+  part1: { start: 0.5, end: 8 },
+  part2: { start: 0.8, end: 8.5 },
+} as const;
 
 /** Limits applied to user input (validated on the server, mirrored in the UI). */
 export const LIMITS = {

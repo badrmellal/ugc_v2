@@ -57,6 +57,14 @@ const EnvSchema = z.object({
   /** Give up on a single video turn after this many seconds. */
   GEMINI_TURN_TIMEOUT_SEC: numberWithDefault(1500),
   GEMINI_POLL_INTERVAL_SEC: numberWithDefault(8),
+  /**
+   * How video turns are run. `stream` (default) keeps an SSE stream open and gets the interaction id
+   * in under a second; `background` creates a background interaction and polls it. Background polling
+   * is reported to fail for some newer `AQ.` API keys; the client then switches to `stream` by itself.
+   */
+  OMNI_TRANSPORT: z.enum(['stream', 'background']).default('stream'),
+  /** Cluster-wide cap on concurrent Omni turns (parallel streams on one key are reported to be cut). */
+  OMNI_MAX_CONCURRENT_TURNS: numberWithDefault(1),
   /** Mock mode only: simulated latency per turn and whether the extension returns the full 20s. */
   MOCK_TURN_SECONDS: numberWithDefault(6),
   MOCK_EXTENSION_RETURNS_FULL: bool(true),
@@ -151,6 +159,8 @@ export interface AppConfig {
     requestTimeoutMs: number;
     turnTimeoutMs: number;
     pollIntervalMs: number;
+    transport: 'stream' | 'background';
+    maxConcurrentTurns: number;
     mockTurnSeconds: number;
     mockExtensionReturnsFull: boolean;
   };
@@ -267,6 +277,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       requestTimeoutMs: positive('GEMINI_REQUEST_TIMEOUT_SEC', e.GEMINI_REQUEST_TIMEOUT_SEC) * 1000,
       turnTimeoutMs: positive('GEMINI_TURN_TIMEOUT_SEC', e.GEMINI_TURN_TIMEOUT_SEC) * 1000,
       pollIntervalMs: positive('GEMINI_POLL_INTERVAL_SEC', e.GEMINI_POLL_INTERVAL_SEC) * 1000,
+      transport: e.OMNI_TRANSPORT,
+      maxConcurrentTurns: Math.max(1, Math.floor(e.OMNI_MAX_CONCURRENT_TURNS)),
       mockTurnSeconds: Math.max(0, e.MOCK_TURN_SECONDS),
       mockExtensionReturnsFull: e.MOCK_EXTENSION_RETURNS_FULL,
     },
