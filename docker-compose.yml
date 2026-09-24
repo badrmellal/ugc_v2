@@ -1,0 +1,69 @@
+# Local / single-host deployment: Postgres + API + worker sharing a storage volume.
+#   cp .env.example .env   # set GEMINI_API_KEY, APP_PASSWORD, SESSION_SECRET
+#   docker compose up --build
+# Optional S3-compatible storage (MinIO): docker compose --profile s3 up --build
+# and set STORAGE_DRIVER=s3 plus the S3_* variables (see README).
+
+x-app: &app
+  build: .
+  image: omni-ugc-studio:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://omni:omni@postgres:5432/omni_ugc
+    LOCAL_STORAGE_DIR: /data/storage
+  volumes:
+    - storage:/data/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: omni
+      POSTGRES_PASSWORD: omni
+      POSTGRES_DB: omni_ugc
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U omni -d omni_ugc']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    <<: *app
+    environment:
+      DATABASE_URL: postgres://omni:omni@postgres:5432/omni_ugc
+      LOCAL_STORAGE_DIR: /data/storage
+      ROLE: web
+    ports:
+      - '${PORT:-8080}:8080'
+
+  worker:
+    <<: *app
+    environment:
+      DATABASE_URL: postgres://omni:omni@postgres:5432/omni_ugc
+      LOCAL_STORAGE_DIR: /data/storage
+      ROLE: worker
+
+  minio:
+    image: minio/minio:latest
+    profiles: ['s3']
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio:/data
+
+volumes:
+  pgdata:
+  storage:
+  minio:

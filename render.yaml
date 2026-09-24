@@ -1,0 +1,62 @@
+# Render Blueprint: API service + background worker + managed Postgres.
+# Render services do not share disks, so storage must be an S3-compatible bucket
+# (AWS S3, Cloudflare R2, Google Cloud Storage interoperability, ...).
+# Fill the variables marked `sync: false` in the Render dashboard.
+databases:
+  - name: omni-ugc-db
+    plan: basic-256mb
+    postgresMajorVersion: '16'
+
+envVarGroups:
+  - name: omni-ugc-shared
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: STORAGE_DRIVER
+        value: s3
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: DAILY_BUDGET_USD
+        value: '50'
+
+services:
+  - type: web
+    name: omni-ugc-web
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - fromGroup: omni-ugc-shared
+      - key: ROLE
+        value: web
+      - key: APP_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: omni-ugc-db
+          property: connectionString
+
+  - type: worker
+    name: omni-ugc-worker
+    runtime: docker
+    plan: starter
+    envVars:
+      - fromGroup: omni-ugc-shared
+      - key: ROLE
+        value: worker
+      - key: DATABASE_URL
+        fromDatabase:
+          name: omni-ugc-db
+          property: connectionString
