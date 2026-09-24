@@ -5,10 +5,12 @@
 import { GoogleGenAI } from '@google/genai';
 
 export interface GenAiCallOptions {
-  /** Per-request timeout in milliseconds. */
+  /** Per-request timeout in milliseconds (for a streamed call it covers the whole stream). */
   timeout?: number;
   /** SDK-level retries. Must be 0 for paid, non-idempotent calls such as video `create`. */
   maxRetries?: number;
+  /** Aborts the request (and closes a stream). */
+  signal?: AbortSignal;
 }
 
 /** Subset of the SDK `File` resource that the adapters read. */
@@ -23,6 +25,7 @@ export interface GenAiFile {
 
 export interface GenAiLike {
   interactions: {
+    /** Returns an Interaction, or an async iterable of SSE events when `params.stream` is true. */
     create(params: Record<string, unknown>, options?: GenAiCallOptions): Promise<unknown>;
     get(id: string, options?: GenAiCallOptions): Promise<unknown>;
     cancel(id: string, options?: GenAiCallOptions): Promise<unknown>;
@@ -35,14 +38,29 @@ export interface GenAiLike {
 
 type CreateParams = Parameters<GoogleGenAI['interactions']['create']>[0];
 
-/** Wraps a real SDK client. The API key stays inside the SDK instance and is never exposed. */
-export function createGenAi(apiKey: string, requestTimeoutMs: number): GenAiLike {
-  const ai = new GoogleGenAI({ apiKey, httpOptions: { timeout: requestTimeoutMs } });
+/**
+ * The SDK ignores `timeout` when a signal is given, so both are merged into one signal here.
+ * Without a signal the SDK applies `timeout` itself.
+ */
+function requestOptions(options: GenAiCallOptions | undefined) {
+  if (!options) return undefined;
+  const { signal, timeout, maxRetries } = options;
+  if (!signal) return { timeout, maxRetries };
+  const merged = timeout && timeout > 0 ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : signal;
+  return { maxRetries, signal: merged };
+}
+
+/**
+ * Wraps a real SDK client. The API key stays inside the SDK instance and is never exposed.
+ * `baseUrl` is only for pointing the SDK at a local test server.
+ */
+export function createGenAi(apiKey: string, requestTimeoutMs: number, baseUrl?: string): GenAiLike {
+  const ai = new GoogleGenAI({ apiKey, httpOptions: { timeout: requestTimeoutMs, ...(baseUrl ? { baseUrl } : {}) } });
   return {
     interactions: {
-      create: (params, options) => ai.interactions.create(params as unknown as CreateParams, options),
-      get: (id, options) => ai.interactions.get(id, undefined, options),
-      cancel: (id, options) => ai.interactions.cancel(id, undefined, options),
+      create: (params, options) => ai.interactions.create(params as unknown as CreateParams, requestOptions(options)),
+      get: (id, options) => ai.interactions.get(id, undefined, requestOptions(options)),
+      cancel: (id, options) => ai.interactions.cancel(id, undefined, requestOptions(options)),
     },
     files: {
       upload: async (params) => (await ai.files.upload(params)) as GenAiFile,
@@ -53,6 +71,14 @@ export function createGenAi(apiKey: string, requestTimeoutMs: number): GenAiLike
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+export function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    typeof (v as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+  );
 }
 
 /** Steps of the current turn, newest first, stopping at the turn's `user_input` step (like the SDK). */

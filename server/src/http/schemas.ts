@@ -15,12 +15,18 @@ import {
   type ScriptPlan,
 } from '../shared/api.js';
 
-/** Removes C0 control characters except tab, line feed and carriage return, plus DEL. */
+/**
+ * Removes C0 control characters except tab, line feed and carriage return, DEL, and unpaired UTF-16
+ * surrogates. Postgres rejects NUL in text and both NUL and lone surrogates in jsonb, so without this
+ * a single stray character in a script or setting would fail the insert with a 500.
+ */
 export function stripControlChars(value: string): string {
   let out = '';
+  // Iterating by code point yields a paired surrogate as one character and a lone one on its own.
   for (const ch of value) {
     const c = ch.codePointAt(0) ?? 0;
     if ((c < 32 && c !== 9 && c !== 10 && c !== 13) || c === 127) continue;
+    if (c >= 0xd800 && c <= 0xdfff) continue;
     out += ch;
   }
   return out;
@@ -33,6 +39,13 @@ const text = (max: number) =>
     .max(max * 2)
     .transform((s) => stripControlChars(s).trim())
     .pipe(z.string().max(max));
+
+/** Cleaned but untrimmed text (content that is rebuilt or only displayed, never trusted). */
+const cleanString = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .transform((s) => stripControlChars(s));
 
 /** Field-level text limit for plan fields (a single part can never be longer than the script). */
 const PLAN_TEXT_MAX = LIMITS.scriptMaxChars;
@@ -56,7 +69,7 @@ const settingsFields = {
   resolution: z.enum(RESOLUTIONS),
   imageMode: z.enum(IMAGE_MODES),
   language: languageSchema,
-  voiceHint: text(LIMITS.extraDirectionsMaxChars),
+  voiceHint: text(LIMITS.voiceHintMaxChars),
   extraDirections: text(LIMITS.extraDirectionsMaxChars),
   reinforceCharacterOnExtend: z.boolean(),
 };
@@ -104,7 +117,7 @@ const segmentSchema = <I extends 1 | 2>(index: I) =>
     action: text(PLAN_TEXT_MAX).default(''),
     camera: text(PLAN_TEXT_MAX).default(''),
     onScreenText: text(PLAN_TEXT_MAX).default(''),
-    prompt: z.string().max(PROMPT_MAX).default(''),
+    prompt: cleanString(PROMPT_MAX).default(''),
   });
 
 /** A user-provided (reviewed or edited) plan. The server re-finalizes it before use. */
@@ -117,7 +130,7 @@ export const planSchema = z.object({
   audio: text(PLAN_TEXT_MAX).default(''),
   language: languageSchema,
   segments: z.tuple([segmentSchema(1), segmentSchema(2)]),
-  warnings: z.array(z.string().max(1000)).max(50).default([]),
+  warnings: z.array(cleanString(1000)).max(50).default([]),
   estimatedSpokenSeconds: z.number().min(0).max(10_000).default(0),
 }) satisfies z.ZodType<ScriptPlan, unknown>;
 
@@ -138,6 +151,8 @@ export const estimateRequestSchema = z.object({
     reinforceCharacterOnExtend: z.boolean().optional(),
   }),
   mode: z.enum(REGENERATION_MODES).optional(),
+  /** A reviewed split will be sent, so the backend does not need to call the splitter. */
+  hasPlan: z.boolean().optional(),
 });
 
 export const regenerateRequestSchema = z.object({

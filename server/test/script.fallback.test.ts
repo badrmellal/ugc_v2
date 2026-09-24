@@ -136,10 +136,50 @@ describe('chooseSplit / fallbackPlan', () => {
     const sentence = 'This is a sentence with exactly ten words in it.';
     const plan = fallbackPlan(Array.from({ length: 8 }, () => sentence).join(' '), settings());
     expect(plan.estimatedSpokenSeconds).toBeGreaterThan(20);
-    expect(plan.warnings[0]).toMatch(
-      /^Script needs about 30\.8s to speak; it may be rushed or cut\. Aim for about 52 words\.$/,
+    expect(plan.warnings[0]).toBe(
+      'Script needs about 30.8s of speech but about 15s fits in a 20s video; it will not fit and speech will be rushed or cut. Aim for about 39 words.',
     );
     expect(plan.warnings.filter((w) => /^Part [12] dialogue needs about/.test(w))).toHaveLength(2);
+  });
+
+  it('warns about a script that fits 20s but not the ~15s speaking budget', () => {
+    const plan = fallbackPlan(
+      'Your phone screen carries more bacteria than most people ever imagine, and you press it against your face every day. ' +
+        'Wipe it with an alcohol wipe every night before bed, and your skin and your pillowcase will both thank you for it.',
+      settings(),
+    );
+    expect(plan.estimatedSpokenSeconds).toBeGreaterThan(15);
+    expect(plan.estimatedSpokenSeconds).toBeLessThan(20);
+    expect(plan.warnings[0]).toMatch(
+      /^Script needs about 1\d\.\ds of speech .* it may sound rushed near the 10s seam\./,
+    );
+  });
+
+  it('never leaves one part empty when a mid-length script has several sentences', () => {
+    const plan = fallbackPlan(
+      'Stop scrolling. This changed my mornings. Two drops, every day. Try it tonight.',
+      settings(),
+    );
+    expect(plan.segments[0].dialogue).not.toBe('');
+    expect(plan.segments[1].dialogue).not.toBe('');
+    expect(`${plan.segments[0].dialogue} ${plan.segments[1].dialogue}`).toBe(
+      'Stop scrolling. This changed my mornings. Two drops, every day. Try it tonight.',
+    );
+  });
+
+  it('splits a maximum-length script quickly, including CJK with a boundary at every character', () => {
+    const cjk = '这是一个很长的句子'.repeat(450).slice(0, 4000);
+    const latin = Array.from({ length: 800 }, (_, i) => `word${i}`)
+      .join(' ')
+      .slice(0, 4000);
+    for (const script of [cjk, latin]) {
+      const started = performance.now();
+      const plan = fallbackPlan(script, settings({ language: script === cjk ? 'zh' : 'en' }));
+      expect(performance.now() - started).toBeLessThan(500);
+      const [a, b] = [countWords(plan.segments[0].dialogue), countWords(plan.segments[1].dialogue)];
+      expect(Math.abs(a - b) / (a + b)).toBeLessThan(0.05);
+      expect(plan.warnings[0]).toMatch(/^Script needs about/);
+    }
   });
 
   it('warns about very short scripts and scripts without dialogue', () => {

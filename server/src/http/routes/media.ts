@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { GenerationRecord } from '../../core/ports.js';
 import { errorBody, notFound } from '../errors.js';
 import { downloadFileName, etagMatches, ifRangeAllows, parseRange, weakEtag, type RangeResult } from '../range.js';
+import { isStorageNotFound } from '../../storage/index.js';
 import { isUuid } from '../schemas.js';
 import type { RouteDeps } from './types.js';
 
@@ -29,10 +30,6 @@ function wantsDownload(query: unknown): boolean {
 
 function header(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
-}
-
-function isStorageNotFound(err: unknown): boolean {
-  return Boolean(err && typeof err === 'object' && (err as { code?: unknown }).code === 'not_found');
 }
 
 export function registerMediaRoutes(app: FastifyInstance, deps: RouteDeps): void {

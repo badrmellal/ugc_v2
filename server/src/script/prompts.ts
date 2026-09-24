@@ -5,15 +5,20 @@
  * extension keeps the same person, place and voice. Part 1 binds the character image with
  * `<IMAGE_REF_0>` (reference) or `<FIRST_FRAME>` (first frame). Part 2 starts with "Extend this
  * video." and uses timecodes that count from the start of the new part (0s = the 10s mark). Speech
- * ends by 8.5s in each part because the last frames of part 1 are regenerated at the seam.
+ * stays inside `SPEECH_WINDOWS` (part 1 ends by 8s, part 2 starts at 0.8s) so about 2 seconds of
+ * silence surround the seam, where Omni regenerates the last frames of part 1.
  */
-import { estimateSpokenSeconds, type GenerationSettings, type ScriptPlan, type VideoStyle } from '../shared/api.js';
+import {
+  SPEECH_WINDOWS,
+  estimateSpokenSeconds,
+  type GenerationSettings,
+  type ScriptPlan,
+  type VideoStyle,
+} from '../shared/api.js';
 import { isEnglish, languageName, quoteSafe, sentence } from './text.js';
 
-/** Latest point (seconds into a 10s part) by which speech should be finished. */
-export const SPEECH_END_SEC = 8.5;
-const PART1_SPEECH_START = 1;
-const PART2_SPEECH_START = 0.5;
+/** Latest point (seconds into a 10s part) by which speech should be finished in either part. */
+export const SPEECH_END_SEC = Math.max(SPEECH_WINDOWS.part1.end, SPEECH_WINDOWS.part2.end);
 
 export interface StyleDefaults {
   character: string;
@@ -24,6 +29,8 @@ export interface StyleDefaults {
   camera: string;
   action1: string;
   action2: string;
+  /** Default action for a part without dialogue (the talking defaults would contradict "No dialogue"). */
+  silentAction: string;
   opening: string;
   closing: string;
 }
@@ -39,6 +46,7 @@ export const STYLE_DEFAULTS: Record<VideoStyle, StyleDefaults> = {
     camera: "handheld selfie at arm's length, eye level, natural light, subtle natural hand movement",
     action1: 'talks straight to the camera with natural expressions and small hand gestures',
     action2: 'keeps talking to the camera with the same energy and natural gestures',
+    silentAction: 'keeps looking at the camera with a relaxed, natural expression and small natural movements',
     opening: 'looks straight into the lens with a natural, engaged expression',
     closing: 'finishes speaking and ends with a warm, genuine smile at the camera',
   },
@@ -52,6 +60,7 @@ export const STYLE_DEFAULTS: Record<VideoStyle, StyleDefaults> = {
     camera: 'steady medium close-up at eye level, presenter centered and facing the camera',
     action1: 'explains to the camera with calm, open hand gestures',
     action2: 'continues explaining to the camera with measured, precise gestures',
+    silentAction: 'stays facing the camera with a calm, composed expression and small natural movements',
     opening: 'faces the camera with a calm, confident expression',
     closing: 'finishes speaking and ends with a small confident nod to the camera',
   },
@@ -67,11 +76,20 @@ function tc(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
-/** Speech window for a part: long enough for the words, never past `SPEECH_END_SEC`. */
-export function speechWindow(dialogue: string, start: number): [number, number] {
+/**
+ * Speech window for a part: starts at the part's window start, long enough for the words (rounded to
+ * half seconds), never past the part's window end.
+ */
+export function speechWindow(dialogue: string, part: 1 | 2): [number, number] {
+  const { start, end: latest } = part === 1 ? SPEECH_WINDOWS.part1 : SPEECH_WINDOWS.part2;
   const need = estimateSpokenSeconds(dialogue) * 1.1 + 0.5;
-  const end = Math.round(Math.min(SPEECH_END_SEC, Math.max(start + 2, start + need)) * 2) / 2;
-  return [start, Math.min(end, SPEECH_END_SEC)];
+  const end = Math.round(Math.max(start + 2, start + need) * 2) / 2;
+  return [start, Math.min(end, latest)];
+}
+
+/** True when the dialogue ends a sentence (so part 1 did not stop mid-sentence). */
+function endsSentence(dialogue: string): boolean {
+  return /[.!?\u2026\u3002\uFF01\uFF1F]["'\u201D\u2019)\]]*$/.test(dialogue.trim());
 }
 
 function mentionsMusic(audio: string): boolean {
@@ -114,18 +132,42 @@ function descriptor(text: string): string {
   return /^(?:A|An|The|This|Their|Her|His)\s/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t;
 }
 
+/** A leading pronoun subject, as in stage directions like "(she leans in)". */
+const PRONOUN_SUBJECT = /^(?:she|he|they|i|we)\s+(?=\p{L})/iu;
+
 /**
- * Joins the subject with an action. Verb phrases ("holds up the jar") read "The person holds up the
- * jar."; anything else ("Close-up of the jar") is kept as its own sentence.
+ * Joins the subject with an action. Verb phrases ("holds up the jar", "she leans in") read "The
+ * person holds up the jar." / "The person leans in."; anything else ("Close-up of the jar") is kept as
+ * its own sentence. Several clauses separated by periods are joined into one sentence.
  */
-function actionSentence(subject: string, action: string): string {
-  const a = action.trim().replace(/[.!?\s]+$/, '');
-  if (!a) return '';
-  const first = a.split(/\s+/)[0] ?? '';
-  if (/^\p{Ll}/u.test(a) || /^[A-Z][a-z]+(?:s|es)$/.test(first)) {
-    return `${subject} ${a.charAt(0).toLowerCase()}${a.slice(1)}.`;
+export function actionSentence(subject: string, action: string): string {
+  const clauses = action
+    .split(/[.!?;]+\s+|\n+/)
+    .map((c) =>
+      c
+        .trim()
+        .replace(/[.!?;\s]+$/, '')
+        .replace(PRONOUN_SUBJECT, ''),
+    )
+    .filter(Boolean);
+  if (!clauses.length) return '';
+  const isVerbPhrase = (c: string) => /^\p{Ll}/u.test(c) || /^[A-Z][a-z]+(?:s|es)$/.test(c.split(/\s+/)[0] ?? '');
+  const out: string[] = [];
+  let verbs: string[] = [];
+  const flush = () => {
+    if (verbs.length) out.push(`${subject} ${verbs.join(', then ')}.`);
+    verbs = [];
+  };
+  for (const c of clauses) {
+    if (isVerbPhrase(c)) {
+      verbs.push(`${c.charAt(0).toLowerCase()}${c.slice(1)}`);
+    } else {
+      flush();
+      out.push(sentence(c));
+    }
   }
-  return sentence(a);
+  flush();
+  return out.join(' ');
 }
 
 function subjectNoun(style: VideoStyle): string {
@@ -151,16 +193,20 @@ export function buildPart1Prompt(plan: ScriptPlan, settings: GenerationSettings)
   if (seg.dialogue || plan.segments[1].dialogue) lines.push(`Voice: ${sentence(plan.voice)}`);
   lines.push(languageLine(plan.language, subject));
 
-  const action = actionSentence(subject, seg.action || d.action1);
   if (seg.dialogue) {
-    const [start, end] = speechWindow(seg.dialogue, PART1_SPEECH_START);
+    const action = actionSentence(subject, seg.action || d.action1);
+    const [start, end] = speechWindow(seg.dialogue, 1);
     const speaker = firstFrame ? subject : `The ${noun} in <IMAGE_REF_0>`;
+    const pause = endsSentence(seg.dialogue)
+      ? 'finishes the sentence and holds a natural pause with relaxed eye contact, ready to continue'
+      : 'pauses briefly mid-thought with relaxed eye contact, ready to continue the sentence';
     lines.push(`[0-${tc(start)}s] ${subject} ${d.opening}.`);
-    lines.push(`[${tc(start)}-${tc(end)}s] ${action} ${speaker} says: "${quoteSafe(seg.dialogue)}"`);
     lines.push(
-      `[${tc(end)}-10s] ${subject} finishes the sentence and holds a natural pause with relaxed eye contact, ready to continue.`,
+      `[${tc(start)}-${tc(end)}s] ${action} ${speaker} says, with natural lip sync: "${quoteSafe(seg.dialogue)}"`,
     );
+    lines.push(`[${tc(end)}-10s] ${subject} ${pause}.`);
   } else {
+    const action = actionSentence(subject, seg.action || d.silentAction);
     lines.push(`[0-10s] ${action} No dialogue.`);
   }
   lines.push(audioLine(plan, false), textLine(seg.onScreenText, style), extraLine(settings));
@@ -193,13 +239,16 @@ export function buildPart2Prompt(plan: ScriptPlan, settings: GenerationSettings)
   if (seg.dialogue || plan.segments[0].dialogue) lines.push(`Voice: ${sentence(plan.voice)}`);
   lines.push(languageLine(plan.language, subject));
 
-  const action = actionSentence(subject, seg.action || d.action2);
   if (seg.dialogue) {
-    const [start, end] = speechWindow(seg.dialogue, PART2_SPEECH_START);
+    const action = actionSentence(subject, seg.action || d.action2);
+    const [start, end] = speechWindow(seg.dialogue, 2);
     lines.push(`[0-${tc(start)}s] ${subject} continues naturally from the previous moment.`);
-    lines.push(`[${tc(start)}-${tc(end)}s] ${action} ${subject} says: "${quoteSafe(seg.dialogue)}"`);
+    lines.push(
+      `[${tc(start)}-${tc(end)}s] ${action} ${subject} says, with natural lip sync: "${quoteSafe(seg.dialogue)}"`,
+    );
     lines.push(`[${tc(end)}-10s] ${subject} ${d.closing}.`);
   } else {
+    const action = actionSentence(subject, seg.action || d.silentAction);
     lines.push(
       `[0-10s] ${action} At the end the ${noun} ${d.closing.replace(/^finishes speaking and /, '')}. No dialogue.`,
     );

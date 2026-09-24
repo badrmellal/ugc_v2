@@ -163,6 +163,7 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
           resolution={g.settings.resolution}
           mode="full"
           reinforceCharacterOnExtend={g.settings.reinforceCharacterOnExtend}
+          hasPlan={g.plan !== null}
         />
       </ConfirmDialog>
 

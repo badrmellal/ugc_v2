@@ -38,6 +38,8 @@ const TIMECODE_PREFIX =
   /^(?:\d{1,2}:\d{2}\s*(?:-|\u2013)\s*\d{1,2}:\d{2}|\d{1,2}(?:\.\d)?s?\s*(?:-|\u2013)\s*\d{1,2}(?:\.\d)?s)\s*[:-]?\s+/i;
 const DIRECTION_CUE =
   /^(?:smil|laugh|chuckl|giggl|paus|beat\b|hold|point|show|pick|lift|rais|turn|look|lean|nod|shrug|gestur|wink|sigh|gasp|whisper|excited|sarcastic|soft|cut\b|b-?roll|on[- ]?screen|text\b|caption|sfx|sound|music|zoom|close[- ]?up|camera|tap|sip|drink|appl|open|walk|sit|stand|wave|clap|hand|to camera|tone|holds?\b|reveal|demonstrat|puts?\b|places?\b|grabs?\b|touch|shak|squeez|pour|spray|rub|mix|stir|writ|draw|visual|graphic|shot\b|scene\b)/i;
+/** Leading pronoun subject of a cue such as "she leans in" (the prompt supplies the subject). */
+const CUE_PRONOUN = /^(?:she|he|they|i|we)\s+(?=\p{L})/iu;
 const ON_SCREEN =
   /^(?:on[- ]?screen(?:\s+text)?|text(?:\s+on\s+screen)?|caption|title|super|lower third)\s*[:-]\s*(.+)$/i;
 
@@ -280,6 +282,34 @@ function seconds(text: string): number {
   return countWords(text) / LIMITS.wordsPerSecond;
 }
 
+/** Same CJK ranges as `countWords` in the shared contract (two CJK characters count as one word). */
+const COUNT_CJK = /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]/;
+
+/**
+ * Word counts of every prefix of `text` (index i = words in `text.slice(0, i)`), computed in one pass
+ * so scoring every boundary of a long sentence stays linear. Matches `countWords` up to CJK rounding.
+ */
+function prefixWords(text: string): Float64Array {
+  const out = new Float64Array(text.length + 1);
+  let latin = 0;
+  let cjk = 0;
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (COUNT_CJK.test(ch)) {
+      cjk += 1;
+      inWord = false;
+    } else if (/\s/.test(ch)) {
+      inWord = false;
+    } else if (!inWord) {
+      latin += 1;
+      inWord = true;
+    }
+    out[i + 1] = latin + cjk / 2;
+  }
+  return out;
+}
+
 interface Candidate {
   /** Unit index where the split happens. */
   unit: number;
@@ -359,10 +389,12 @@ export function chooseSplit(units: ScriptUnit[]): SplitResult {
   }
   for (const i of speechIdx) {
     const u = units[i] as Extract<ScriptUnit, { type: 'speech' }>;
+    const words = prefixWords(u.text);
+    const unitWords = words[u.text.length] ?? 0;
     for (const b of intraBoundaries(u.text)) {
-      const head = u.text.slice(0, b.offset);
-      const left = before[i]! + seconds(head);
-      if (seconds(head) <= 0 || seconds(u.text.slice(b.offset)) <= 0) continue;
+      const headWords = words[b.offset] ?? 0;
+      if (headWords <= 0 || unitWords - headWords <= 0) continue;
+      const left = before[i]! + headWords / LIMITS.wordsPerSecond;
       consider({ unit: i, offset: b.offset, cost: Math.abs(totalSec - 2 * left) + PENALTY[b.level], level: b.level });
     }
   }
@@ -399,10 +431,11 @@ function directionsToSegment(directions: string[]): { action: string; onScreenTe
     } else if (/\bmusic\b|\bsfx\b|sound effect/i.test(d)) {
       audio.push(d);
     } else {
-      actions.push(d.replace(/[.\s]+$/, ''));
+      const action = d.replace(/[.\s]+$/, '').replace(CUE_PRONOUN, '');
+      if (action) actions.push(action);
     }
   }
-  return { action: actions.join('. '), onScreenText: texts.filter(Boolean).join(' / '), audio };
+  return { action: actions.join('; '), onScreenText: texts.filter(Boolean).join(' / '), audio };
 }
 
 /** Deterministic split of a script into a finalized two-part plan (`source: 'fallback'`). */

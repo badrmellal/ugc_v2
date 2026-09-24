@@ -152,26 +152,92 @@ export function expectedOrigin(req: FastifyRequest, config: AppConfig): string |
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function pathOf(url: string): string {
-  const q = url.indexOf('?');
-  return q === -1 ? url : url.slice(0, q);
+  const end = url.search(/[?#]/);
+  return end === -1 ? url : url.slice(0, end);
 }
 
-export function isApiPath(url: string): boolean {
+/** Percent-decodes a path the way the router does before matching (raw path when malformed). */
+function decodedPath(url: string): string {
   const path = pathOf(url);
+  if (!path.includes('%')) return path;
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function startsWithApi(path: string): boolean {
   return path === '/api' || path.startsWith('/api/');
+}
+
+/** Whether a raw URL (path + optional query) points under /api, before or after percent-decoding. */
+export function isApiPath(url: string): boolean {
+  return startsWithApi(pathOf(url)) || startsWithApi(decodedPath(url));
+}
+
+/**
+ * Whether a request targets the API. The router matches percent-decoded paths (`/%61pi/config` is
+ * routed to `/api/config`), so the matched route decides first and the decoded URL covers requests
+ * that match no route (404s).
+ */
+export function isApiRequest(req: FastifyRequest): boolean {
+  const route = req.routeOptions?.url;
+  if (route && startsWithApi(route)) return true;
+  return isApiPath(req.url);
+}
+
+/** `/api/auth/*` routes (session, login, logout) are reachable without credentials. */
+function isPublicAuthRoute(req: FastifyRequest): boolean {
+  return req.routeOptions?.url?.startsWith('/api/auth/') ?? false;
+}
+
+/** Rate limiter shape of `fastify.createRateLimit()`. */
+export type AttemptLimiter = (
+  req: FastifyRequest,
+  opts?: { increment?: boolean },
+) => Promise<{ isAllowed: true } | { isAllowed: false; isExceeded: boolean; remaining: number; ttlInSeconds: number }>;
+
+export interface AuthHookOptions {
+  /**
+   * Counts failed bearer-token attempts per client. Once exhausted, every token attempt from that
+   * client (valid or not) gets 429 until the window resets, so tokens cannot be brute-forced.
+   */
+  tokenAttempts?: AttemptLimiter;
+}
+
+function tooManyAttempts(ttlInSeconds: number): HttpError {
+  const wait = Math.max(ttlInSeconds, 1);
+  return new HttpError(
+    429,
+    'rate_limited',
+    `Too many requests with an invalid API token. Try again in ${wait} seconds.`,
+  );
 }
 
 /**
  * onRequest hook for everything under /api:
  * 1. resolves the caller (bearer token or session cookie) into `req.auth`;
  * 2. rejects cross-origin mutating requests (403 forbidden_origin), except bearer-token calls;
- * 3. requires authentication except for /api/auth/* (401 unauthorized), unless auth is disabled.
+ * 3. requires authentication except for the /api/auth/* routes (401 unauthorized), unless auth is disabled.
  */
-export function createAuthHook(config: AppConfig) {
+export function createAuthHook(config: AppConfig, opts: AuthHookOptions = {}) {
   const enabled = isAuthEnabled(config);
-  return async function authHook(req: FastifyRequest): Promise<void> {
-    if (!isApiPath(req.url)) return;
+  return async function authHook(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    if (!isApiRequest(req)) return;
+
+    const presentedToken = bearerToken(req) !== null;
+    const limiter = enabled && presentedToken ? opts.tokenAttempts : undefined;
+    if (limiter) {
+      const state = await limiter(req, { increment: false });
+      if (!state.isAllowed && state.remaining <= 0) {
+        reply.header('retry-after', String(Math.max(state.ttlInSeconds, 1)));
+        throw tooManyAttempts(state.ttlInSeconds);
+      }
+    }
+
     req.auth = resolveAuth(req, config);
+    if (limiter && !req.auth) await limiter(req);
     if (!enabled && !req.auth) req.auth = { subject: 'anonymous', method: 'none' };
 
     if (MUTATING_METHODS.has(req.method) && req.auth?.method !== 'token') {
@@ -180,6 +246,8 @@ export function createAuthHook(config: AppConfig) {
         const given = normalizeOrigin(origin);
         const expected = expectedOrigin(req, config);
         if (!given || !expected || given !== expected) {
+          // Operators need both values to fix PUBLIC_ORIGIN or the proxy's forwarded headers.
+          req.log.warn({ origin: given ?? 'invalid', expectedOrigin: expected }, 'cross-origin request blocked');
           throw new HttpError(
             403,
             'forbidden_origin',
@@ -190,7 +258,7 @@ export function createAuthHook(config: AppConfig) {
     }
 
     if (!enabled) return;
-    if (pathOf(req.url).startsWith('/api/auth/')) return;
+    if (isPublicAuthRoute(req)) return;
     if (!req.auth) throw new HttpError(401, 'unauthorized', 'Sign in to continue.');
   };
 }

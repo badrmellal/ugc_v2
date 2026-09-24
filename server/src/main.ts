@@ -7,7 +7,11 @@ import { isAuthEnabled } from './http/auth.js';
 import { buildApp, buildHealthApp, resolveWebDist } from './http/app.js';
 import { createLogger } from './logger.js';
 
-/** Hard stop if a graceful shutdown hangs (Cloud Run sends SIGKILL 10s after SIGTERM by default). */
+/**
+ * Hard stop if a graceful shutdown hangs (for example a slow client still downloading a video). Cloud
+ * Run sends SIGKILL 10s after SIGTERM anyway; the worker releases its job leases within
+ * WORKER_SHUTDOWN_GRACE_MS, before that. Platforms with a longer grace period get up to this long.
+ */
 const FORCE_EXIT_MS = 25_000;
 
 function authMode(config: AppConfig): string {
@@ -106,6 +110,8 @@ async function start(config: AppConfig, logger: Logger): Promise<void> {
   process.once('SIGINT', () => void shutdown('SIGINT'));
 
   await app.listen({ host: config.host, port: config.port });
+  // A SIGTERM that arrived while listen() was pending must not start claiming jobs.
+  if (shuttingDown) return;
   ctx.worker?.start();
   logger.info(
     { host: config.host, port: config.port, worker: Boolean(ctx.worker) },

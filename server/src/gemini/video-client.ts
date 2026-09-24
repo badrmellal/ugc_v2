@@ -2,10 +2,18 @@
  * Gemini Omni video adapter: Files API upload of the character image, Interactions API turns
  * (part 1 generation and part 2 extension chained with `previous_interaction_id`), polling,
  * cancellation and download of the output video.
+ *
+ * Turns run over one of three transports, chosen by `OMNI_TRANSPORT` and downgraded at runtime:
+ * - `stream` (default): an SSE stream; the interaction id arrives with the first event, the rest of
+ *   the stream is consumed in the background and `getInteraction` reads its state from memory.
+ * - `background`: a background interaction polled with `interactions.get`.
+ * - `blocking`: a plain call that returns when the video is done (last resort only).
+ * A 400 that names `background` or `stream`, or a background interaction that cannot be polled,
+ * switches the process to the next transport.
  */
 import { createWriteStream } from 'node:fs';
 import { rename, rm, stat, writeFile } from 'node:fs/promises';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { Logger } from 'pino';
@@ -24,7 +32,7 @@ import { redactSecrets } from '../pipeline/errors.js';
 import { normalizeUsage } from '../pricing/pricing.js';
 import type { Resolution } from '../shared/api.js';
 import { classifyGeminiError, looksLikeSafetyBlock, SAFETY_HINT } from './errors.js';
-import { createGenAi, currentTurnSteps, isRecord, type GenAiFile, type GenAiLike } from './genai.js';
+import { createGenAi, currentTurnSteps, isAsyncIterable, isRecord, type GenAiFile, type GenAiLike } from './genai.js';
 
 export const GEMINI_FILES_HOST = 'generativelanguage.googleapis.com';
 const FILES_DOWNLOAD_BASE = `https://${GEMINI_FILES_HOST}/v1beta/files`;
@@ -32,10 +40,17 @@ const FILES_DOWNLOAD_BASE = `https://${GEMINI_FILES_HOST}/v1beta/files`;
 const DEFAULT_FILE_TTL_MS = 47 * 60 * 60 * 1000;
 const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
+/** Max wait for the first stream event (which carries the interaction id), and for a background create. */
+const CREATE_ACK_TIMEOUT_MS = 120_000;
+/** Finished stream turns are kept in memory this long so the pipeline can read their final state. */
+const FINISHED_STREAM_TTL_MS = 30 * 60 * 1000;
+const MAX_FINISHED_STREAMS = 16;
 
 // ---------------------------------------------------------------------------
 // Request building (pure)
 // ---------------------------------------------------------------------------
+
+export type OmniTransport = 'stream' | 'background' | 'blocking';
 
 export interface OmniImagePart {
   type: 'image';
@@ -63,10 +78,14 @@ export interface OmniTurnParams {
   response_format: OmniVideoResponseFormat;
   previous_interaction_id?: string;
   background?: boolean;
+  stream?: boolean;
 }
 
 export interface BuildTurnOptions {
+  /** Create a background interaction (ignored when `stream` is set). */
   background: boolean;
+  /** Stream the interaction as SSE events. */
+  stream?: boolean;
   /** Send `duration` on the extension turn (always sent on the initial turn). */
   includeDuration: boolean;
   /** Send `resolution` on the extension turn (default true; always sent on the initial turn). */
@@ -80,6 +99,8 @@ function durationString(sec: number): string {
   return `${s}s`;
 }
 
+const IMAGE_REF_TAG = /<IMAGE_REF_\d+>/;
+
 /**
  * Makes sure an attached image is bound by a tag: an untagged image is silently ignored by Omni.
  * Prompts built by `script/prompts.ts` already carry the tag, so this is only a safety net.
@@ -88,10 +109,26 @@ export function ensureImageTag(prompt: string, kind: 'initial' | 'extension', im
   if (kind === 'initial' && imageMode === 'first_frame') {
     return prompt.includes('<FIRST_FRAME>') ? prompt : `<FIRST_FRAME> ${prompt}`;
   }
+  // A prompt built for first-frame mode must not bind the image a second way.
+  prompt = prompt.replace(/<FIRST_FRAME>\s*/g, '').trim();
   if (prompt.includes('<IMAGE_REF_0>')) return prompt;
   return kind === 'initial'
     ? `${prompt}\nThe main character is the person in <IMAGE_REF_0>.`
     : `${prompt}\nThe person is the same person shown in <IMAGE_REF_0>.`;
+}
+
+/**
+ * Removes image tags from a prompt sent without an image: a tag that points at no image makes the
+ * request invalid. Lines that exist only to bind the image are dropped whole.
+ */
+export function stripImageTags(prompt: string): string {
+  if (!IMAGE_REF_TAG.test(prompt) && !prompt.includes('<FIRST_FRAME>')) return prompt;
+  return prompt
+    .split('\n')
+    .filter((line) => !IMAGE_REF_TAG.test(line))
+    .join('\n')
+    .replace(/<FIRST_FRAME>\s*/g, '')
+    .trim();
 }
 
 /**
@@ -104,12 +141,17 @@ export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: Bui
   const prompt = req.prompt.trim();
   if (!prompt) throw new VideoModelError('invalid_request', 'The prompt for this turn is empty.', { retryable: false });
   const delivery: Pick<OmniVideoResponseFormat, 'delivery'> = opts.uriDelivery === false ? {} : { delivery: 'uri' };
+  const mode = (params: OmniTurnParams): OmniTurnParams => {
+    if (opts.stream) params.stream = true;
+    else if (opts.background) params.background = true;
+    return params;
+  };
 
   if (req.kind === 'initial') {
     if (!req.image) {
       throw new VideoModelError('invalid_request', 'Part 1 needs the uploaded character image.', { retryable: false });
     }
-    const params: OmniTurnParams = {
+    return mode({
       model,
       input: [
         { type: 'image', uri: req.image.uri, mime_type: req.image.mimeType },
@@ -122,9 +164,7 @@ export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: Bui
         resolution: req.resolution,
         ...delivery,
       },
-    };
-    if (opts.background) params.background = true;
-    return params;
+    });
   }
 
   if (!req.previousInteractionId) {
@@ -135,19 +175,23 @@ export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: Bui
   const responseFormat: OmniVideoResponseFormat = { type: 'video', ...delivery };
   if (opts.includeExtensionResolution !== false) responseFormat.resolution = req.resolution;
   if (opts.includeDuration) responseFormat.duration = durationString(req.durationSec);
-  const params: OmniTurnParams = {
+  let input: OmniTurnParams['input'];
+  if (req.image) {
+    input = [
+      { type: 'image', uri: req.image.uri, mime_type: req.image.mimeType },
+      { type: 'text', text: ensureImageTag(prompt, 'extension', 'reference') },
+    ];
+  } else {
+    input = stripImageTags(prompt);
+    if (!input)
+      throw new VideoModelError('invalid_request', 'The prompt for this turn is empty.', { retryable: false });
+  }
+  return mode({
     model,
     previous_interaction_id: req.previousInteractionId,
-    input: req.image
-      ? [
-          { type: 'image', uri: req.image.uri, mime_type: req.image.mimeType },
-          { type: 'text', text: ensureImageTag(prompt, 'extension', 'reference') },
-        ]
-      : prompt,
+    input,
     response_format: responseFormat,
-  };
-  if (opts.background) params.background = true;
-  return params;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +335,120 @@ export function mapInteraction(raw: unknown, secrets: (string | null | undefined
 }
 
 // ---------------------------------------------------------------------------
+// Stream events (pure)
+// ---------------------------------------------------------------------------
+
+/** An Interaction assembled from SSE events; readable with `mapInteraction` once it has an id. */
+export interface StreamedInteraction {
+  id: string | null;
+  status: string;
+  steps: Record<string, unknown>[];
+  usage?: unknown;
+  errors: { code: string | null; message: string }[];
+  /** Id of the last event, for logs. */
+  lastEventId: string | null;
+}
+
+export function newStreamedInteraction(): StreamedInteraction {
+  return { id: null, status: 'in_progress', steps: [], errors: [], lastEventId: null };
+}
+
+function isTerminalRawStatus(status: string): boolean {
+  return mapStatus(status) !== 'in_progress';
+}
+
+function stepAt(acc: StreamedInteraction, index: number): Record<string, unknown> {
+  const existing = acc.steps[index];
+  if (isRecord(existing)) return existing;
+  const created: Record<string, unknown> = { type: 'model_output', content: [] };
+  acc.steps[index] = created;
+  return created;
+}
+
+function applyDelta(step: Record<string, unknown>, delta: Record<string, unknown>): void {
+  const content = Array.isArray(step.content) ? (step.content as unknown[]) : (step.content = []);
+  const last = content[content.length - 1];
+  if (delta.type === 'video') {
+    let item = isRecord(last) && last.type === 'video' && !last.uri ? last : null;
+    if (!item || (typeof delta.uri === 'string' && delta.uri)) {
+      item = { type: 'video' };
+      content.push(item);
+    }
+    if (typeof delta.uri === 'string' && delta.uri) item.uri = delta.uri;
+    // Inline video data may arrive in several chunks of one base64 string.
+    if (typeof delta.data === 'string' && delta.data)
+      item.data = `${typeof item.data === 'string' ? item.data : ''}${delta.data}`;
+    if (typeof delta.mime_type === 'string' && delta.mime_type) item.mime_type = delta.mime_type;
+  } else if (delta.type === 'text' && typeof delta.text === 'string') {
+    if (isRecord(last) && last.type === 'text' && typeof last.text === 'string') last.text += delta.text;
+    else content.push({ type: 'text', text: delta.text });
+  }
+}
+
+/** Applies one SSE event (`InteractionSSEEvent`) to the assembled interaction. Unknown events are ignored. */
+export function applyStreamEvent(acc: StreamedInteraction, event: unknown): void {
+  if (!isRecord(event)) return;
+  if (typeof event.event_id === 'string' && event.event_id) acc.lastEventId = event.event_id;
+  const terminal = isTerminalRawStatus(acc.status);
+  switch (event.event_type) {
+    case 'interaction.created':
+    case 'interaction.completed': {
+      const it = event.interaction;
+      if (!isRecord(it)) return;
+      if (typeof it.id === 'string' && it.id) acc.id ??= it.id;
+      if (typeof it.status === 'string' && (event.event_type === 'interaction.completed' || !terminal)) {
+        acc.status = it.status;
+      }
+      if (it.usage !== undefined) acc.usage = it.usage;
+      // Lifecycle payloads may omit steps. When present they replace the streamed ones, unless that
+      // would drop a video already received through deltas.
+      if (Array.isArray(it.steps)) {
+        const incoming = (it.steps as unknown[]).filter(isRecord);
+        const hasOutput = incoming.some((s) => s.type === 'model_output');
+        if (findVideo({ steps: incoming }) || (hasOutput && !findVideo({ steps: acc.steps }))) acc.steps = incoming;
+      }
+      if (event.event_type === 'interaction.completed' && !isTerminalRawStatus(acc.status)) acc.status = 'completed';
+      return;
+    }
+    case 'interaction.status_update':
+      if (typeof event.interaction_id === 'string' && event.interaction_id) acc.id ??= event.interaction_id;
+      if (typeof event.status === 'string' && !terminal) acc.status = event.status;
+      return;
+    case 'step.start':
+      if (typeof event.index === 'number' && event.index >= 0 && isRecord(event.step)) {
+        const step = { ...event.step };
+        if (Array.isArray(step.content))
+          step.content = (step.content as unknown[]).map((c) => (isRecord(c) ? { ...c } : c));
+        acc.steps[event.index] = step;
+      }
+      return;
+    case 'step.delta':
+      if (typeof event.index === 'number' && event.index >= 0 && isRecord(event.delta)) {
+        applyDelta(stepAt(acc, event.index), event.delta);
+      }
+      if (isRecord(event.metadata) && event.metadata.total_usage !== undefined) acc.usage = event.metadata.total_usage;
+      return;
+    case 'step.stop':
+      if (event.usage !== undefined) acc.usage = event.usage;
+      return;
+    case 'error': {
+      const e = isRecord(event.error) ? event.error : {};
+      const message = typeof e.message === 'string' ? e.message.trim() : '';
+      const code = typeof e.code === 'string' || typeof e.code === 'number' ? String(e.code) : null;
+      acc.errors.push({ code, message: message || 'The Gemini stream reported an error.' });
+      if (!terminal) acc.status = 'failed';
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function streamedToRaw(acc: StreamedInteraction, id: string): Record<string, unknown> {
+  return { id, status: acc.status, steps: acc.steps, usage: acc.usage, errors: acc.errors };
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -306,6 +464,27 @@ export interface GeminiVideoClientOptions {
   /** Max wait for an uploaded or generated file to become ACTIVE. */
   fileActiveTimeoutMs?: number;
   filePollIntervalMs?: number;
+  /** Max wait for the interaction id after a create (first stream event or background response). */
+  createAckTimeoutMs?: number;
+  /**
+   * Transports other workers found unusable (persisted). Read before each turn so the whole cluster
+   * learns from one rejection. Errors are ignored.
+   */
+  loadUnsupportedTransports?: () => Promise<OmniTransport[]>;
+  /** Called once when this process finds a transport unusable, so it can be persisted. */
+  onTransportRejected?: (transport: OmniTransport, reason: string) => void;
+}
+
+/** A turn whose SSE stream this process is reading. */
+interface StreamTurn {
+  id: string;
+  generationId: string;
+  acc: StreamedInteraction;
+  /** `open` while events arrive, `ended` after a terminal event, `broken` when cut before one. */
+  phase: 'open' | 'ended' | 'broken';
+  controller: AbortController;
+  cancelled: boolean;
+  finishedAt: number | null;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -325,6 +504,26 @@ function is400About(err: VideoModelError, word: RegExp): boolean {
   return err.status === 400 && word.test(err.message);
 }
 
+const TRANSPORT_FALLBACKS: Record<'stream' | 'background', OmniTransport[]> = {
+  stream: ['stream', 'background', 'blocking'],
+  background: ['background', 'stream', 'blocking'],
+};
+
+/** Counts bytes flowing through and fails once `max` is exceeded (servers can omit Content-Length). */
+function byteLimit(max: number): Transform {
+  let seen = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc, done) {
+      seen += chunk.length;
+      if (seen > max) {
+        done(new VideoModelError('invalid_output', 'The generated video is unexpectedly large.', { retryable: false }));
+        return;
+      }
+      done(null, chunk);
+    },
+  });
+}
+
 export class GeminiVideoClient implements VideoModelClient {
   readonly model: string;
   readonly isMock = false;
@@ -334,16 +533,25 @@ export class GeminiVideoClient implements VideoModelClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: Logger;
   private readonly requestTimeoutMs: number;
+  private readonly streamTimeoutMs: number;
+  private readonly createAckTimeoutMs: number;
   private readonly fileActiveTimeoutMs: number;
   private readonly filePollIntervalMs: number;
-  /** Flips to false for the rest of the process if the API rejects `background: true`. */
-  private backgroundSupported = true;
+  /** Transports in order of preference; rejected ones are skipped for the rest of the process. */
+  private readonly transports: OmniTransport[];
+  private readonly unsupportedTransports = new Set<OmniTransport>();
   /** Flips to false for the rest of the process if the API rejects `duration` on extension turns. */
   private extensionDurationSupported = true;
   /** Flips to false for the rest of the process if the API rejects `resolution` on extension turns. */
   private extensionResolutionSupported = true;
   /** Flips to false for the rest of the process if the API rejects `delivery: 'uri'` (inline data is then used). */
   private uriDeliverySupported = true;
+  /** Turns streamed by this process, by interaction id. */
+  private readonly streams = new Map<string, StreamTurn>();
+  /** Background interactions created by this process that have not finished yet. */
+  private readonly backgroundIds = new Set<string>();
+  private readonly loadUnsupportedTransports: GeminiVideoClientOptions['loadUnsupportedTransports'];
+  private readonly onTransportRejected: GeminiVideoClientOptions['onTransportRejected'];
 
   constructor(opts: GeminiVideoClientOptions) {
     const { config } = opts;
@@ -353,21 +561,53 @@ export class GeminiVideoClient implements VideoModelClient {
       throw new Error('GEMINI_API_KEY is required for the Gemini video client.');
     }
     this.requestTimeoutMs = config.gemini.requestTimeoutMs;
+    // A stream stays open for the whole turn; the pipeline enforces the turn deadline itself.
+    this.streamTimeoutMs = Math.max(config.gemini.requestTimeoutMs, config.gemini.turnTimeoutMs) + 60_000;
+    this.createAckTimeoutMs = opts.createAckTimeoutMs ?? CREATE_ACK_TIMEOUT_MS;
     this.ai = opts.ai ?? createGenAi(this.apiKey, this.requestTimeoutMs);
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.sleep = opts.sleep ?? defaultSleep;
     this.log = opts.logger.child({ component: 'gemini-video' });
     this.fileActiveTimeoutMs = opts.fileActiveTimeoutMs ?? 120_000;
     this.filePollIntervalMs = opts.filePollIntervalMs ?? 2_000;
+    this.transports = TRANSPORT_FALLBACKS[config.gemini.transport === 'background' ? 'background' : 'stream'];
+    this.loadUnsupportedTransports = opts.loadUnsupportedTransports;
+    this.onTransportRejected = opts.onTransportRejected;
   }
 
-  /** Whether turns are currently created in background mode (false after a rejected background create). */
+  /** Marks transports as unusable for this process (e.g. learned by another worker). */
+  markUnsupported(transports: readonly OmniTransport[]): void {
+    for (const t of transports) {
+      if (t !== 'blocking' && this.transports.includes(t)) this.unsupportedTransports.add(t);
+    }
+  }
+
+  /** Transport used for the next turn. */
+  get transport(): OmniTransport {
+    return this.transports.find((t) => !this.unsupportedTransports.has(t)) ?? 'blocking';
+  }
+
+  /** Whether turns are currently created in background mode. */
   get usesBackground(): boolean {
-    return this.backgroundSupported;
+    return this.transport === 'background';
   }
 
   private classify(err: unknown, context: Parameters<typeof classifyGeminiError>[2]): VideoModelError {
     return classifyGeminiError(err, this.apiKey, context);
+  }
+
+  private dropTransport(transport: OmniTransport, reason: string, generationId?: string): void {
+    if (transport === 'blocking' || this.unsupportedTransports.has(transport)) return;
+    this.unsupportedTransports.add(transport);
+    try {
+      this.onTransportRejected?.(transport, redactSecrets(reason, [this.apiKey]));
+    } catch {
+      // Persistence is best effort.
+    }
+    this.log.warn(
+      { generationId, rejected: transport, next: this.transport, reason: redactSecrets(reason, [this.apiKey]) },
+      'omni transport not usable, switching for the rest of this process',
+    );
   }
 
   async uploadImage(input: { data: Buffer; mimeType: string; displayName: string }): Promise<UploadedFileRef> {
@@ -431,7 +671,12 @@ export class GeminiVideoClient implements VideoModelClient {
           if (!e.retryable) throw e;
         }
       }
-      if (file && (!file.state || file.state === 'ACTIVE' || file.state === 'FAILED')) return file;
+      if (
+        file &&
+        (!file.state || file.state === 'STATE_UNSPECIFIED' || file.state === 'ACTIVE' || file.state === 'FAILED')
+      ) {
+        return file;
+      }
       if (Date.now() >= deadline) {
         if (context === 'upload') {
           throw new VideoModelError('upload_timeout', 'Gemini did not finish processing the character image in time.', {
@@ -447,13 +692,22 @@ export class GeminiVideoClient implements VideoModelClient {
   }
 
   async startTurn(req: VideoTurnRequest): Promise<InteractionState> {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const background = this.backgroundSupported;
+    this.pruneStreams();
+    if (this.loadUnsupportedTransports) {
+      try {
+        this.markUnsupported(await this.loadUnsupportedTransports());
+      } catch (err) {
+        this.log.debug({ err: redactSecrets(String(err), [this.apiKey]) }, 'could not load unsupported transports');
+      }
+    }
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const transport = this.transport;
       const includeDuration = req.kind === 'initial' || this.extensionDurationSupported;
       const includeExtensionResolution = this.extensionResolutionSupported;
       const uriDelivery = this.uriDeliverySupported;
       const params = buildTurnRequest(req, this.model, {
-        background,
+        background: transport === 'background',
+        stream: transport === 'stream',
         includeDuration,
         includeExtensionResolution,
         uriDelivery,
@@ -469,7 +723,7 @@ export class GeminiVideoClient implements VideoModelClient {
           imageMode: req.imageMode,
           withImage: Boolean(req.image),
           previousInteractionId: req.previousInteractionId,
-          background,
+          transport,
           includeDuration,
           promptChars: promptText.length,
           promptPreview: promptText.slice(0, 200),
@@ -478,25 +732,21 @@ export class GeminiVideoClient implements VideoModelClient {
       );
       this.log.debug({ generationId: req.generationId, prompt: promptText }, 'omni turn prompt');
       try {
-        const raw = await this.ai.interactions.create(params as unknown as Record<string, unknown>, {
-          // Never let the SDK retry a paid video create: a retried request can be billed twice.
-          maxRetries: 0,
-          timeout: background ? Math.min(this.requestTimeoutMs, 120_000) : this.requestTimeoutMs,
-        });
-        const state = mapInteraction(raw, [this.apiKey]);
+        const state =
+          transport === 'stream' ? await this.createStreamed(params, req) : await this.createPlain(params, transport);
         this.log.info(
-          { generationId: req.generationId, kind: req.kind, interactionId: state.id, status: state.status },
+          { generationId: req.generationId, kind: req.kind, interactionId: state.id, status: state.status, transport },
           'omni turn created',
         );
         return state;
       } catch (err) {
         const e = this.classify(err, 'create');
-        if (background && is400About(e, /background/i)) {
-          this.backgroundSupported = false;
-          this.log.warn(
-            { generationId: req.generationId, reason: e.message },
-            'background interactions rejected, switching to blocking calls for this process',
-          );
+        if (transport === 'background' && is400About(e, /\bbackground\b/i)) {
+          this.dropTransport('background', e.message, req.generationId);
+          continue;
+        }
+        if (transport === 'stream' && is400About(e, /\bstream(?:ing)?\b|event-stream/i)) {
+          this.dropTransport('stream', e.message, req.generationId);
           continue;
         }
         if (req.kind === 'extension' && includeDuration && is400About(e, /duration/i)) {
@@ -524,7 +774,7 @@ export class GeminiVideoClient implements VideoModelClient {
           continue;
         }
         this.log.warn(
-          { generationId: req.generationId, kind: req.kind, code: e.code, status: e.status },
+          { generationId: req.generationId, kind: req.kind, code: e.code, status: e.status, transport },
           'omni create failed',
         );
         throw e;
@@ -532,6 +782,125 @@ export class GeminiVideoClient implements VideoModelClient {
     }
     throw new VideoModelError('invalid_request', 'Gemini rejected every variant of the video request.', {
       retryable: false,
+    });
+  }
+
+  /** Background or blocking create. Never retried by the SDK: a retried create can be billed twice. */
+  private async createPlain(params: OmniTurnParams, transport: OmniTransport): Promise<InteractionState> {
+    const background = transport === 'background';
+    const raw = await this.ai.interactions.create(params as unknown as Record<string, unknown>, {
+      maxRetries: 0,
+      timeout: background ? Math.min(this.requestTimeoutMs, this.createAckTimeoutMs) : this.requestTimeoutMs,
+    });
+    const state = mapInteraction(raw, [this.apiKey]);
+    if (background && state.status === 'in_progress') this.backgroundIds.add(state.id);
+    return state;
+  }
+
+  /**
+   * Opens the SSE stream and returns as soon as the interaction id is known. The rest of the stream is
+   * read in the background; `getInteraction` serves its state from memory.
+   */
+  private async createStreamed(params: OmniTurnParams, req: VideoTurnRequest): Promise<InteractionState> {
+    const controller = new AbortController();
+    const result = await this.ai.interactions.create(params as unknown as Record<string, unknown>, {
+      maxRetries: 0,
+      timeout: this.streamTimeoutMs,
+      signal: controller.signal,
+    });
+    if (!isAsyncIterable(result)) {
+      // The server answered with a plain Interaction instead of a stream.
+      return mapInteraction(result, [this.apiKey]);
+    }
+    const iterator = result[Symbol.asyncIterator]();
+    const acc = newStreamedInteraction();
+    let ackTimer: NodeJS.Timeout | undefined;
+    const ackTimeout = new Promise<never>((_, reject) => {
+      ackTimer = setTimeout(() => {
+        reject(
+          new VideoModelError(
+            'timeout',
+            `Gemini did not confirm the video request within ${Math.round(this.createAckTimeoutMs / 1000)}s.`,
+            { retryable: true },
+          ),
+        );
+      }, this.createAckTimeoutMs);
+    });
+    try {
+      while (!acc.id) {
+        const next = await Promise.race([iterator.next(), ackTimeout]);
+        if (next.done) break;
+        applyStreamEvent(acc, next.value);
+        if (!acc.id && acc.errors.length) break;
+      }
+    } catch (err) {
+      controller.abort();
+      throw err;
+    } finally {
+      clearTimeout(ackTimer);
+    }
+    if (!acc.id) {
+      controller.abort();
+      const first = acc.errors[0];
+      if (first) {
+        // Rejected before an interaction existed (for example an input safety block). The code is a
+        // URI naming the error type; an invalid-argument type is treated like an HTTP 400 so the
+        // request downgrades (duration, resolution, delivery) still apply.
+        const code = first.code ?? '';
+        const status = Number(code) || (/invalid|argument|bad.?request/i.test(code) ? 400 : null);
+        throw this.classify({ status, message: first.message }, 'create');
+      }
+      throw new VideoModelError('invalid_response', 'The Gemini stream ended before an interaction id was sent.', {
+        retryable: true,
+      });
+    }
+    const turn: StreamTurn = {
+      id: acc.id,
+      generationId: req.generationId,
+      acc,
+      phase: 'open',
+      controller,
+      cancelled: false,
+      finishedAt: null,
+    };
+    this.streams.set(turn.id, turn);
+    void this.readRest(turn, iterator);
+    return mapInteraction(streamedToRaw(acc, turn.id), [this.apiKey]);
+  }
+
+  private async readRest(turn: StreamTurn, iterator: AsyncIterator<unknown>): Promise<void> {
+    let failure: VideoModelError | null = null;
+    try {
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) break;
+        applyStreamEvent(turn.acc, next.value);
+      }
+    } catch (err) {
+      if (!turn.cancelled) failure = this.classify(err, 'get');
+    } finally {
+      turn.phase = isTerminalRawStatus(turn.acc.status) ? 'ended' : 'broken';
+      turn.finishedAt = Date.now();
+      turn.controller.abort();
+    }
+    const log = { generationId: turn.generationId, interactionId: turn.id, status: turn.acc.status };
+    if (turn.phase === 'broken' && !turn.cancelled) {
+      this.log.warn({ ...log, code: failure?.code ?? null }, 'omni stream ended before the turn finished');
+    } else {
+      this.log.info({ ...log, lastEventId: turn.acc.lastEventId }, 'omni stream finished');
+    }
+  }
+
+  /** Drops finished stream turns that the pipeline has had time to read (they can hold inline video). */
+  private pruneStreams(): void {
+    const now = Date.now();
+    const finished = [...this.streams.values()]
+      .filter((t) => t.finishedAt !== null)
+      .sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
+    finished.forEach((t, i) => {
+      if (now - (t.finishedAt ?? now) > FINISHED_STREAM_TTL_MS || finished.length - i > MAX_FINISHED_STREAMS) {
+        this.streams.delete(t.id);
+      }
     });
   }
 
@@ -546,37 +915,106 @@ export class GeminiVideoClient implements VideoModelClient {
         },
       );
     }
+    const turn = this.streams.get(id);
+    if (turn) return this.streamedState(turn);
+    return this.fetchInteraction(id);
+  }
+
+  private async streamedState(turn: StreamTurn): Promise<InteractionState> {
+    const state = mapInteraction(streamedToRaw(turn.acc, turn.id), [this.apiKey]);
+    if (turn.phase === 'open') return state;
+    if (turn.phase === 'ended') {
+      if (state.status === 'completed' && !state.video) {
+        // The stream carried no video part: read the stored interaction, which has the output.
+        const stored = await this.fetchInteraction(turn.id).catch(() => null);
+        if (stored?.video) return stored;
+      }
+      this.logFinished(state);
+      return state;
+    }
+    // Cut before a terminal event: continue with plain polling when the interaction can be read.
+    this.streams.delete(turn.id);
+    try {
+      return await this.fetchInteraction(turn.id);
+    } catch (err) {
+      const e = err instanceof VideoModelError ? err : this.classify(err, 'get');
+      if (e.retryable && e.code !== 'interaction_lost') {
+        // Transient: keep the turn so the next poll tries again.
+        this.streams.set(turn.id, turn);
+        throw e;
+      }
+      throw new VideoModelError(
+        'interaction_lost',
+        `The connection to Gemini was lost while this part was generating and its result cannot be read (${e.message}). It will be started again.`,
+        { retryable: true, status: e.status, cause: e },
+      );
+    }
+  }
+
+  /** Reads a stored interaction with `interactions.get`. */
+  private async fetchInteraction(id: string): Promise<InteractionState> {
     let raw: unknown;
     try {
       raw = await this.ai.interactions.get(id, { timeout: Math.min(this.requestTimeoutMs, 300_000) });
     } catch (err) {
-      throw this.classify(err, 'get');
+      const e = this.classify(err, 'get');
+      if (e.status !== 400 && e.status !== 403 && e.status !== 404) throw e;
+      if (this.backgroundIds.has(id)) {
+        // Created a moment ago but cannot be polled (reported for some newer API keys): stream instead.
+        this.backgroundIds.delete(id);
+        this.dropTransport('background', e.message);
+        throw new VideoModelError(
+          'interaction_lost',
+          `Gemini accepted the background request but its status cannot be read (${e.message}). It will be started again over a streaming connection.`,
+          { retryable: true, status: e.status, cause: e },
+        );
+      }
+      // The interaction exists (it was created with this key) but cannot be read any more, for example
+      // a streamed turn after a worker restart. The pipeline starts the turn again instead of failing.
+      throw new VideoModelError('interaction_lost', `${e.message} The turn will be started again.`, {
+        retryable: true,
+        status: e.status,
+        cause: e,
+      });
     }
     const state = mapInteraction(raw, [this.apiKey]);
     if (state.status !== 'in_progress') {
-      this.log.info(
-        {
-          interactionId: id,
-          status: state.status,
-          hasVideo: Boolean(state.video),
-          videoDelivery: state.video ? (state.video.inlineData ? 'inline' : 'uri') : null,
-          errorCode: state.error?.code ?? null,
-        },
-        'omni turn finished',
-      );
+      this.backgroundIds.delete(id);
+      this.logFinished(state);
     }
     return state;
   }
 
+  private logFinished(state: InteractionState): void {
+    this.log.info(
+      {
+        interactionId: state.id,
+        status: state.status,
+        hasVideo: Boolean(state.video),
+        videoDelivery: state.video ? (state.video.inlineData ? 'inline' : 'uri') : null,
+        errorCode: state.error?.code ?? null,
+      },
+      'omni turn finished',
+    );
+  }
+
   async cancel(id: string): Promise<void> {
     if (id.startsWith('mock_')) return;
+    const turn = this.streams.get(id);
+    if (turn && turn.phase === 'open') {
+      turn.cancelled = true;
+      if (!isTerminalRawStatus(turn.acc.status)) turn.acc.status = 'cancelled';
+      turn.controller.abort();
+    }
+    this.backgroundIds.delete(id);
     try {
       await this.ai.interactions.cancel(id, { maxRetries: 1, timeout: 30_000 });
       this.log.info({ interactionId: id }, 'omni interaction cancelled');
     } catch (err) {
       const e = this.classify(err, 'cancel');
-      // Already finished, blocking (not cancellable) or unknown interactions: nothing to cancel.
+      // Already finished, streamed/blocking (not cancellable) or unknown interactions: nothing to cancel.
       if (e.status === 400 || e.status === 404 || e.status === 409 || e.code === 'not_found') return;
+      if (turn) return; // The stream is closed; the server-side cancel is best effort only.
       this.log.warn({ interactionId: id, code: e.code }, 'omni cancel failed');
       throw e;
     }
@@ -623,12 +1061,23 @@ export class GeminiVideoClient implements VideoModelClient {
     try {
       let res: Response | null = null;
       for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-        const host = new URL(url).hostname;
-        const headers: Record<string, string> = host === GEMINI_FILES_HOST ? { 'x-goog-api-key': this.apiKey } : {};
+        const target = new URL(url);
+        if (target.protocol !== 'https:') {
+          throw new VideoModelError('invalid_output', 'The video download was redirected to an insecure address.', {
+            retryable: false,
+          });
+        }
+        const headers: Record<string, string> =
+          target.hostname === GEMINI_FILES_HOST ? { 'x-goog-api-key': this.apiKey } : {};
         res = await this.fetchImpl(url, { headers, redirect: 'manual', signal });
         const location = res.headers.get('location');
         if (res.status >= 300 && res.status < 400 && location) {
           await res.body?.cancel().catch(() => undefined);
+          if (hop === MAX_REDIRECTS) {
+            throw new VideoModelError('download_failed', 'The video download was redirected too many times.', {
+              retryable: true,
+            });
+          }
           url = new URL(location, url).toString();
           continue;
         }
@@ -644,7 +1093,11 @@ export class GeminiVideoClient implements VideoModelClient {
         await res.body.cancel().catch(() => undefined);
         throw new VideoModelError('invalid_output', 'The generated video is unexpectedly large.', { retryable: false });
       }
-      await pipeline(Readable.fromWeb(res.body as unknown as NodeReadableStream), createWriteStream(partPath));
+      await pipeline(
+        Readable.fromWeb(res.body as unknown as NodeReadableStream),
+        byteLimit(MAX_VIDEO_BYTES),
+        createWriteStream(partPath),
+      );
       const { size } = await stat(partPath);
       if (size === 0) {
         throw new VideoModelError('empty_output', 'The downloaded video is empty.', { retryable: true });

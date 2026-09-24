@@ -61,7 +61,12 @@ class FakeVideoClient implements VideoModelClient {
 
   async uploadImage(): Promise<UploadedFileRef> {
     this.uploads += 1;
-    return { uri: 'fake://image', mimeType: 'image/jpeg', name: 'files/fake', expiresAt: new Date(Date.now() + 47 * 3600e3) };
+    return {
+      uri: 'fake://image',
+      mimeType: 'image/jpeg',
+      name: 'files/fake',
+      expiresAt: new Date(Date.now() + 47 * 3600e3),
+    };
   }
 
   async startTurn(req: VideoTurnRequest): Promise<InteractionState> {
@@ -81,7 +86,13 @@ class FakeVideoClient implements VideoModelClient {
     const status = statuses[Math.min(entry.polls, statuses.length - 1)]!;
     entry.polls += 1;
     if (status !== 'completed') {
-      return { id, status, video: null, usage: null, error: status === 'in_progress' ? null : (entry.script.error ?? null) };
+      return {
+        id,
+        status,
+        video: null,
+        usage: null,
+        error: status === 'in_progress' ? null : (entry.script.error ?? null),
+      };
     }
     if (entry.script.emptyOutput) return { id, status, video: null, usage: { outputTokens: 0 }, error: null };
     const seconds = entry.script.outputSeconds ?? (entry.req.kind === 'initial' ? 2 : 4);
@@ -187,7 +198,13 @@ describe('generation pipeline', () => {
     const id = randomUUID();
     const keys = generationKeys(id);
     const img = join(dir, `${id}.png`);
-    await media.synthesizeClip({ output: join(dir, `${id}-src.mp4`), durationSec: 1, width: 64, height: 64, label: 'x' });
+    await media.synthesizeClip({
+      output: join(dir, `${id}-src.mp4`),
+      durationSec: 1,
+      width: 64,
+      height: 64,
+      label: 'x',
+    });
     await media.thumbnail(join(dir, `${id}-src.mp4`), img, 0);
     await storage.putFile(keys.characterImage, img, 'image/jpeg');
     return repo.insert({

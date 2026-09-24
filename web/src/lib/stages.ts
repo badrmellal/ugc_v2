@@ -23,9 +23,15 @@ function pipelineIndex(stage: GenerationStage): number {
 }
 
 /** Index of the last pipeline stage the job reached, based on its current stage or its event log. */
-function lastReachedIndex(g: Pick<GenerationDTO, 'stage' | 'events'>): number {
+function lastReachedIndex(
+  g: Pick<GenerationDTO, 'stage' | 'events'> & Partial<Pick<GenerationDTO, 'failedStage'>>,
+): number {
   const current = pipelineIndex(g.stage);
   if (current >= 0) return current;
+  if (g.failedStage) {
+    const stopped = pipelineIndex(g.failedStage);
+    if (stopped >= 0) return stopped;
+  }
   let reached = -1;
   for (const event of g.events) {
     reached = Math.max(reached, pipelineIndex(event.stage));
@@ -33,7 +39,9 @@ function lastReachedIndex(g: Pick<GenerationDTO, 'stage' | 'events'>): number {
   return reached;
 }
 
-export function computeSteps(g: Pick<GenerationDTO, 'status' | 'stage' | 'events'>): Step[] {
+export function computeSteps(
+  g: Pick<GenerationDTO, 'status' | 'stage' | 'events'> & Partial<Pick<GenerationDTO, 'failedStage'>>,
+): Step[] {
   const build = (stateAt: (index: number) => StepState): Step[] =>
     PIPELINE_STAGES.map((stage, index) => ({ stage, label: STAGE_LABELS[stage], state: stateAt(index) }));
 

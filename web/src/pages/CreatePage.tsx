@@ -326,6 +326,11 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
               resolution={settings.resolution}
               mode="full"
               reinforceCharacterOnExtend={settings.reinforceCharacterOnExtend}
+              hasPlan={
+                (source
+                  ? planForRegenerate(plan, sourcePlan, { stale: planStale, edited: planEdited })
+                  : planForSubmit(plan, { stale: planStale, edited: planEdited })) != null
+              }
             />
           </Card>
 

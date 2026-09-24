@@ -13,7 +13,7 @@ import type { AppContext } from '../app-context.js';
 import type { AppConfig } from '../config.js';
 import { createSecretScrubber } from '../logger.js';
 import { LIMITS } from '../shared/api.js';
-import { createAuthHook, isApiPath, isAuthEnabled } from './auth.js';
+import { createAuthHook, isApiPath, isApiRequest, isAuthEnabled } from './auth.js';
 import { REAL_TURN_SECONDS } from './dto.js';
 import { createErrorHandler, errorBody, HttpError } from './errors.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -27,6 +27,14 @@ import type { LimitHook, RouteDeps } from './routes/types.js';
 /** JSON bodies are small (scripts are capped at 4,000 chars); uploads go through multipart. */
 export const JSON_BODY_LIMIT = 1024 * 1024;
 const HOUR_MS = 60 * 60 * 1000;
+/**
+ * Max time to receive a whole request (headers and body). Protects against clients that trickle
+ * an upload forever; 5 minutes is enough for a 10 MB image on a slow mobile connection. Responses
+ * (video streams) are not limited by it.
+ */
+export const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+/** Failed bearer-token attempts allowed per client and minute before token requests get 429. */
+export const TOKEN_ATTEMPTS_PER_MINUTE = 20;
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -191,6 +199,7 @@ function baseFastify(ctx: AppContext): FastifyInstance {
     logController: new AccessLogController(),
     return503OnClosing: true,
     keepAliveTimeout: 65_000,
+    requestTimeout: REQUEST_TIMEOUT_MS,
   }) as unknown as FastifyInstance;
 
   app.setErrorHandler(createErrorHandler({ scrub: createSecretScrubber(ctx.config) }));
@@ -224,20 +233,12 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // (so rejected requests still carry security headers and the session cookie is parsed).
   app.register(helmet, helmetOptions(config));
   app.register(cookie);
-  app.after(() => {
-    app.addHook('onRequest', createAuthHook(config));
-    app.addHook('onSend', async (req, reply, payload) => {
-      // API responses are per-user and live: never cache them unless a route opted in.
-      if (isApiPath(req.url) && !reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
-      return payload;
-    });
-  });
   app.register(rateLimit, {
     global: true,
     max: config.rateLimit.perMinute,
     timeWindow: 60_000,
     // Only the API is rate limited; static assets and health probes are not.
-    allowList: (req) => !isApiPath(req.url),
+    allowList: (req) => !isApiRequest(req),
     keyGenerator: rateLimitKey(config),
     errorResponseBuilder: (_req, context) =>
       new HttpError(429, 'rate_limited', `Too many requests. Try again in ${context.after}.`),
@@ -247,11 +248,26 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     limits: {
       fileSize: LIMITS.imageMaxBytes,
       files: 1,
-      fields: 5,
-      fieldSize: 64 * 1024,
-      parts: 6,
+      // `payload` (a JSON document that may carry a reviewed plan) plus a little slack.
+      fields: 3,
+      fieldSize: JSON_BODY_LIMIT,
+      parts: 4,
       fieldNameSize: 100,
     },
+  });
+  app.after(() => {
+    // Registered once helmet, cookie and rate-limit are loaded (createRateLimit is available).
+    app.addHook(
+      'onRequest',
+      createAuthHook(config, {
+        tokenAttempts: app.createRateLimit({ max: TOKEN_ATTEMPTS_PER_MINUTE, timeWindow: 60_000 }),
+      }),
+    );
+    app.addHook('onSend', async (req, reply, payload) => {
+      // API responses are per-user and live: never cache them unless a route opted in.
+      if (isApiRequest(req) && !reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
+      return payload;
+    });
   });
 
   const webDist = resolveWebDist(config);
@@ -297,7 +313,8 @@ export function buildApp(ctx: AppContext): FastifyInstance {
 
   app.setNotFoundHandler((req, reply) => {
     const path = pathOf(req.url);
-    const spaRoute = webDist && (req.method === 'GET' || req.method === 'HEAD') && !isApiPath(path) && acceptsHtml(req);
+    const spaRoute =
+      webDist && (req.method === 'GET' || req.method === 'HEAD') && !isApiRequest(req) && acceptsHtml(req);
     if (spaRoute) {
       // Client-side routes (/g/123, /history...) are resolved by the SPA.
       return reply.type('text/html; charset=utf-8').sendFile('index.html');

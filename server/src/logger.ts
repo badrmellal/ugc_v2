@@ -58,24 +58,33 @@ export function createSecretScrubber(config: AppConfig): (text: string) => strin
   };
 }
 
+/**
+ * Serializer for `err` fields. Upstream SDK errors can echo request URLs or headers, so secrets are
+ * scrubbed from message and stack. Rejection reasons are not always errors (`Promise.reject(null)`,
+ * a string...), and must not make the serializer itself throw.
+ */
+export function createErrorSerializer(config: AppConfig): (err: unknown) => unknown {
+  const scrub = createSecretScrubber(config);
+  return (err: unknown) => {
+    if (typeof err === 'string') return scrub(err);
+    if (!err || typeof err !== 'object') return err;
+    const out = stdSerializers.err(err as Error) as unknown as Record<string, unknown>;
+    if (!out || typeof out !== 'object') return out;
+    if (typeof out.message === 'string') out.message = scrub(out.message);
+    if (typeof out.stack === 'string') out.stack = scrub(out.stack);
+    return out;
+  };
+}
+
 export function createLogger(config: AppConfig, overrides: Partial<LoggerOptions> = {}): Logger {
   const pretty = config.env === 'development' && Boolean(process.stdout.isTTY);
-  const scrub = createSecretScrubber(config);
 
   const options: LoggerOptions = {
     level: config.logLevel,
     base: { service: 'omni-ugc-studio', role: config.role },
     redact: { paths: REDACT_PATHS, censor: '[REDACTED]' },
     timestamp: pino.stdTimeFunctions.isoTime,
-    serializers: {
-      // Upstream SDK errors can echo request URLs or headers: scrub secrets from message and stack.
-      err: (err: Error) => {
-        const out = stdSerializers.err(err) as unknown as Record<string, unknown>;
-        if (typeof out.message === 'string') out.message = scrub(out.message);
-        if (typeof out.stack === 'string') out.stack = scrub(out.stack);
-        return out;
-      },
-    },
+    serializers: { err: createErrorSerializer(config) },
     ...(pretty
       ? {
           transport: {

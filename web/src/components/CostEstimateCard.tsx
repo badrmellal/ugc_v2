@@ -10,14 +10,17 @@ export function CostEstimate({
   resolution,
   mode = 'full',
   reinforceCharacterOnExtend = false,
+  hasPlan = false,
   className,
 }: {
   resolution: Resolution;
   mode?: RegenerationMode;
   reinforceCharacterOnExtend?: boolean;
+  /** A reviewed split is sent with the job (no splitter call). */
+  hasPlan?: boolean;
   className?: string;
 }) {
-  const { query: estimate, outdated } = useEstimate({ resolution, mode, reinforceCharacterOnExtend });
+  const { query: estimate, outdated } = useEstimate({ resolution, mode, reinforceCharacterOnExtend, hasPlan });
   if (estimate.isPending) {
     return (
       <div className={cn('space-y-2', className)} aria-busy="true" aria-label="Loading cost estimate">

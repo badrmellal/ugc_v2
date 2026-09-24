@@ -1,14 +1,19 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { get as httpGet } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppContext } from '../src/app-context.js';
+import { loadConfig } from '../src/config.js';
+import { TOKEN_ATTEMPTS_PER_MINUTE } from '../src/http/app.js';
 import { signSession, SESSION_COOKIE } from '../src/http/auth.js';
 import { FfmpegMediaTools } from '../src/media/ffmpeg.js';
+import { estimateCost } from '../src/pricing/pricing.js';
 import {
   DEFAULT_SETTINGS,
   LIMITS,
@@ -23,7 +28,16 @@ import {
 import { generationKeys, LocalStorage } from '../src/storage/index.js';
 import { createTestDb, type TestDb } from './helpers/db.js';
 import { createRequest, makePng, multipart, SAMPLE_SCRIPT, SAMPLE_SETTINGS } from './helpers/fixtures.js';
-import { bearer, createHarness, json, login, TEST_SESSION_SECRET, type Harness } from './helpers/http.js';
+import {
+  bearer,
+  createHarness,
+  json,
+  login,
+  TEST_SESSION_SECRET,
+  TEST_TOKEN,
+  testEnv,
+  type Harness,
+} from './helpers/http.js';
 
 let testDb: TestDb;
 let current: Harness | null = null;
@@ -280,6 +294,67 @@ describe('auth', () => {
     expect((await app.inject({ method: 'GET', url: '/api/generations' })).statusCode).toBe(200);
   });
 
+  it('requires auth on percent-encoded API paths (the router decodes them)', async () => {
+    const h = await harness();
+    for (const url of ['/%61pi/generations', '/ap%69/config', `/%61pi/generations/${randomUUID()}/video`]) {
+      const res = await h.app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(401);
+      expect(errorOf(res).code).toBe('unauthorized');
+    }
+    const req = createRequest();
+    const created = await h.app.inject({
+      method: 'POST',
+      url: '/%61pi/generations',
+      headers: req.headers,
+      payload: req.payload,
+    });
+    expect(created.statusCode).toBe(401);
+    expect(await h.ctx.repo.countActive()).toBe(0);
+    expect(h.storage.objects.size).toBe(0);
+
+    // The auth routes stay public (also encoded); unknown routes under /api/auth/ do not.
+    expect((await h.app.inject({ method: 'GET', url: '/%61pi/auth/session' })).statusCode).toBe(200);
+    expect((await h.app.inject({ method: 'GET', url: '/api/auth/nope' })).statusCode).toBe(401);
+
+    const ok = await h.app.inject({ method: 'GET', url: '/%61pi/config', headers: bearer });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers['cache-control']).toBe('no-store');
+  });
+
+  it('rate limits percent-encoded API paths like plain ones', async () => {
+    const { app } = await harness({ RATE_LIMIT_PER_MINUTE: '2' });
+    for (let i = 0; i < 2; i++) {
+      expect((await app.inject({ method: 'GET', url: '/%61pi/config', headers: bearer })).statusCode).toBe(200);
+    }
+    const limited = await app.inject({ method: 'GET', url: '/%61pi/config', headers: bearer });
+    expect(limited.statusCode).toBe(429);
+  });
+
+  it('blocks bearer-token guessing after repeated failures', async () => {
+    const { app } = await harness();
+    const guess = (token: string) =>
+      app.inject({ method: 'GET', url: '/api/generations', headers: { authorization: `Bearer ${token}` } });
+    for (let i = 0; i < TOKEN_ATTEMPTS_PER_MINUTE; i++) {
+      expect((await guess(`wrong-${i}`)).statusCode).toBe(401);
+    }
+    const blocked = await guess('wrong-again');
+    expect(blocked.statusCode).toBe(429);
+    expect(errorOf(blocked).code).toBe('rate_limited');
+    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
+    // While blocked, even the right token is refused, so a correct guess cannot be recognized.
+    expect((await guess(TEST_TOKEN)).statusCode).toBe(429);
+    // Cookie sessions are not affected.
+    const cookie = await login(app);
+    expect((await app.inject({ method: 'GET', url: '/api/generations', headers: { cookie } })).statusCode).toBe(200);
+  });
+
+  it('does not count valid tokens as failures', async () => {
+    const { app } = await harness();
+    for (let i = 0; i < TOKEN_ATTEMPTS_PER_MINUTE + 5; i++) {
+      expect((await app.inject({ method: 'GET', url: '/api/config', headers: bearer })).statusCode).toBe(200);
+    }
+  });
+
   it('rate limits login attempts to 10 per minute', async () => {
     const { app } = await harness();
     for (let i = 0; i < 10; i++) {
@@ -337,6 +412,19 @@ describe('origin check and security headers', () => {
       payload: { password: 'correct horse battery staple' },
     });
     expect(loginCsrf.statusCode).toBe(403);
+  });
+
+  it('checks the origin on percent-encoded API paths too', async () => {
+    const { app } = await harness();
+    const cookie = await login(app);
+    const foreign = await app.inject({
+      method: 'POST',
+      url: '/%61pi/estimate',
+      headers: { cookie, origin: 'https://evil.example' },
+      payload: estimate,
+    });
+    expect(foreign.statusCode).toBe(403);
+    expect(errorOf(foreign).code).toBe('forbidden_origin');
   });
 
   it('exempts bearer-token requests', async () => {
@@ -747,6 +835,76 @@ describe('POST /api/generations', () => {
     expect(jsonBody.statusCode).toBe(415);
   });
 
+  it('rejects truncated and malformed multipart bodies with 400 instead of hanging', async () => {
+    const h = await harness();
+    const full = createRequest(undefined, { data: Buffer.concat([makePng(), Buffer.alloc(5000, 7)]) });
+    const cases: { name: string; headers: Record<string, string>; payload: Buffer | string }[] = [
+      {
+        name: 'ends inside the file',
+        headers: full.headers,
+        payload: full.payload.subarray(0, full.payload.length - 2000),
+      },
+      { name: 'ends inside the payload field', headers: full.headers, payload: full.payload.subarray(0, 150) },
+      { name: 'no boundary', headers: { 'content-type': 'multipart/form-data' }, payload: 'hello' },
+      { name: 'no parts', headers: { 'content-type': 'multipart/form-data; boundary=xyz' }, payload: 'no parts here' },
+    ];
+    for (const c of cases) {
+      const res = await h.app.inject({
+        method: 'POST',
+        url: '/api/generations',
+        headers: { ...bearer, ...c.headers },
+        payload: c.payload,
+      });
+      expect(res.statusCode, c.name).toBe(400);
+      expect(errorOf(res).code, c.name).toBe('validation_error');
+    }
+    expect(await h.ctx.repo.countActive()).toBe(0);
+    expect(h.storage.objects.size).toBe(0);
+  }, 15_000);
+
+  it('removes the temporary upload when the client disconnects mid-upload', async () => {
+    const h = await harness();
+    const uploads = async () => (await readdir(tmpdir())).filter((name) => name.startsWith('omni-upload-')).length;
+    const before = await uploads();
+    const address = await h.app.listen({ port: 0, host: '127.0.0.1' });
+    const body = createRequest(undefined, { data: Buffer.concat([makePng(), Buffer.alloc(512 * 1024, 7)]) });
+    const socket = connect(Number(new URL(address).port), '127.0.0.1');
+    await once(socket, 'connect');
+    socket.write(
+      `POST /api/generations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${TEST_TOKEN}\r\n` +
+        `Content-Type: ${body.headers['content-type']}\r\nContent-Length: ${body.payload.length}\r\n\r\n`,
+    );
+    socket.write(body.payload.subarray(0, 64 * 1024));
+    await vi.waitFor(async () => expect(await uploads()).toBeGreaterThan(before), { timeout: 5000 });
+    socket.destroy();
+    await vi.waitFor(async () => expect(await uploads()).toBe(before), { timeout: 5000 });
+    expect(await h.ctx.repo.countActive()).toBe(0);
+    expect(h.storage.objects.size).toBe(0);
+  });
+
+  it('drops lone surrogates and NUL before they reach jsonb columns', async () => {
+    const h = await harness();
+    const plan = { ...samplePlan(), character: 'Person \udc00in the image', warnings: ['check\u0000 pacing \ud800'] };
+    const dto = await createGeneration(h.app, {
+      script: 'Hello \ud83d\ude00 there\ud800, this is a test script.',
+      settings: { ...SAMPLE_SETTINGS, voiceHint: 'calm \ud800voice', extraDirections: 'x\udfffy' },
+      plan,
+    });
+    expect(dto.script).toBe('Hello \ud83d\ude00 there, this is a test script.');
+    expect(dto.settings).toMatchObject({ voiceHint: 'calm voice', extraDirections: 'xy' });
+    expect(dto.plan?.character).toBe('Person in the image');
+    expect(dto.plan?.warnings).toEqual(['check pacing ']);
+
+    const regen = await h.app.inject({
+      method: 'POST',
+      url: `/api/generations/${dto.id}/regenerate`,
+      headers: { ...bearer, 'content-type': 'application/json' },
+      payload: '{"mode":"full","settings":{"voiceHint":"deep\\ud800 voice"}}',
+    });
+    expect(regen.statusCode, regen.body).toBe(202);
+    expect(json<GenerationDTO>(regen).settings.voiceHint).toBe('deep voice');
+  });
+
   it('strips control characters from text', async () => {
     const { app } = await harness();
     const dto = await createGeneration(app, {
@@ -785,6 +943,47 @@ describe('POST /api/generations', () => {
     expect(errorOf(second).code).toBe('queue_full');
     await app.inject({ method: 'POST', url: `/api/generations/${first.id}/cancel`, headers: bearer });
     expect((await postGeneration(app)).statusCode).toBe(202);
+  });
+
+  it('admits no more than MAX_QUEUED_JOBS jobs from concurrent requests', async () => {
+    const h = await harness({ MAX_QUEUED_JOBS: '3' });
+    const source = await createGeneration(h.app);
+    await completeGeneration(h, source.id);
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        h.app.inject({
+          method: 'POST',
+          url: `/api/generations/${source.id}/regenerate`,
+          headers: bearer,
+          payload: { mode: 'part2' },
+        }),
+      ),
+    );
+    const codes = results.map((r) => r.statusCode).sort();
+    expect(codes).toEqual([202, 202, 202, 429, 429, 429, 429, 429]);
+    expect(results.filter((r) => r.statusCode === 429).every((r) => errorOf(r).code === 'queue_full')).toBe(true);
+    expect(await h.ctx.repo.countActive()).toBe(3);
+  });
+
+  it('never overshoots the daily budget with concurrent requests', async () => {
+    const part2 = estimateCost(loadConfig(testEnv()).pricing, { resolution: '720p', mode: 'part2', needsSplit: false });
+    // Room for exactly two part-2 regenerations once the source has finished.
+    const h = await harness({ DAILY_BUDGET_USD: String(Math.round(part2.totalUsd * 2.5 * 100) / 100) });
+    const source = await createGeneration(h.app);
+    await completeGeneration(h, source.id);
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        h.app.inject({
+          method: 'POST',
+          url: `/api/generations/${source.id}/regenerate`,
+          headers: bearer,
+          payload: { mode: 'part2' },
+        }),
+      ),
+    );
+    const codes = results.map((r) => r.statusCode).sort();
+    expect(codes).toEqual([202, 202, 402, 402, 402, 402]);
+    expect(await h.ctx.repo.countActive()).toBe(2);
   });
 
   it('applies the hourly creation limit', async () => {
@@ -1064,6 +1263,29 @@ describe('POST /api/generations/:id/regenerate', () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it('returns 404 and admits nothing when the source is deleted while the request is in flight', async () => {
+    const h = await harness();
+    const source = await createGeneration(h.app);
+    await completeGeneration(h, source.id);
+    const get = h.ctx.repo.get.bind(h.ctx.repo);
+    h.ctx.repo.get = async (id: string) => {
+      const found = await get(id);
+      // Simulates a DELETE that commits right after the regenerate request read its source.
+      if (found && id === source.id) await testDb.db.query('DELETE FROM generations WHERE id = $1', [id]);
+      return found;
+    };
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/generations/${source.id}/regenerate`,
+      headers: bearer,
+      payload: { mode: 'part2' },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(errorOf(res).code).toBe('not_found');
+    const { rows } = await testDb.db.query('SELECT COUNT(*)::int AS n FROM generations');
+    expect(rows[0].n).toBe(0);
+  });
+
   it('validates the body and the id', async () => {
     const h = await harness();
     const source = await createGeneration(h.app);
@@ -1096,11 +1318,26 @@ describe('cancel and delete', () => {
     expect(res.statusCode).toBe(200);
     const canceled = json<GenerationDTO>(res);
     expect(canceled).toMatchObject({ status: 'canceled', stage: 'canceled', canCancel: false });
-    expect(canceled.events.map((e) => e.message)).toContain('Canceled before it started');
+    expect(canceled.events.map((e) => e.message)).toContain('Canceled while waiting in the queue');
 
     const again = await app.inject({ method: 'POST', url: `/api/generations/${dto.id}/cancel`, headers: bearer });
     expect(again.statusCode).toBe(409);
-    expect(errorOf(again).code).toBe('conflict');
+    expect(errorOf(again)).toMatchObject({ code: 'conflict', message: 'This generation has already been canceled.' });
+  });
+
+  it('returns 409 when the job finishes while the cancel request is in flight', async () => {
+    const h = await harness();
+    const dto = await createGeneration(h.app);
+    const requestCancel = h.ctx.repo.requestCancel.bind(h.ctx.repo);
+    h.ctx.repo.requestCancel = async (id: string) => {
+      await h.ctx.repo.update(id, { status: 'succeeded', stage: 'completed', progress: 100 });
+      return requestCancel(id);
+    };
+    const res = await h.app.inject({ method: 'POST', url: `/api/generations/${dto.id}/cancel`, headers: bearer });
+    expect(res.statusCode).toBe(409);
+    expect(errorOf(res).message).toContain('already finished');
+    const events = await h.ctx.repo.listEvents(dto.id);
+    expect(events.map((e) => e.message)).toEqual(['Queued']);
   });
 
   it('flags a running job for cancellation (with an empty JSON body)', async () => {
@@ -1375,6 +1612,11 @@ describe('single-page app', () => {
     const api = await app.inject({ method: 'GET', url: '/api/nope', headers: { ...bearer, ...html } });
     expect(api.statusCode).toBe(404);
     expect(api.headers['content-type']).toContain('application/json');
+    const encodedApi = await app.inject({ method: 'GET', url: '/%61pi/nope', headers: { ...bearer, ...html } });
+    expect(encodedApi.statusCode).toBe(404);
+    expect(encodedApi.headers['content-type']).toContain('application/json');
+    const anonymousApi = await app.inject({ method: 'GET', url: '/%61pi/generations', headers: html });
+    expect(anonymousApi.statusCode).toBe(401);
 
     const post = await app.inject({ method: 'POST', url: '/somewhere', headers: html });
     expect(post.statusCode).toBe(404);

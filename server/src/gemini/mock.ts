@@ -83,6 +83,8 @@ export class MockVideoClient implements VideoModelClient {
   private readonly log: Logger;
   private readonly now: () => number;
   private readonly interactions = new Map<string, MockInteraction>();
+  /** Uploaded image files and when they were written, pruned after the Files API TTL. */
+  private readonly uploads = new Map<string, number>();
   private dirPromise: Promise<string> | null = null;
   private readonly fixedDir: string | null;
   private failNextTurn: Error | null;
@@ -128,6 +130,7 @@ export class MockVideoClient implements VideoModelClient {
     const dir = await this.dir();
     const name = `upload-${randomUUID()}.${extensionFor(input.mimeType)}`;
     await writeFile(join(dir, name), input.data);
+    this.uploads.set(name, this.now());
     return {
       uri: `${MOCK_FILE_SCHEME}${name}`,
       mimeType: input.mimeType,
@@ -231,7 +234,6 @@ export class MockVideoClient implements VideoModelClient {
       rec.videoFile = file;
       rec.durationSec = seconds;
     } else {
-      const previous = await this.previousClip(dir, req, width, height, imagePath);
       const partFile = `${rec.id}-new.mp4`;
       await this.media.synthesizeClip({
         output: join(dir, partFile),
@@ -242,9 +244,15 @@ export class MockVideoClient implements VideoModelClient {
         imagePath,
       });
       if (this.config.gemini.mockExtensionReturnsFull) {
+        // Like Omni: the extension returns the previous clip plus the new seconds as one video.
+        const previous = await this.previousClip(dir, req, width, height, imagePath);
         const file = `${rec.id}.mp4`;
-        await this.media.concat([join(dir, previous.file), join(dir, partFile)], join(dir, file));
-        await rm(join(dir, partFile), { force: true });
+        try {
+          await this.media.concat([join(dir, previous.file), join(dir, partFile)], join(dir, file));
+        } finally {
+          await rm(join(dir, partFile), { force: true });
+          if (previous.standIn) await rm(join(dir, previous.file), { force: true });
+        }
         rec.videoFile = file;
         rec.durationSec = previous.durationSec + seconds;
       } else {
@@ -252,7 +260,7 @@ export class MockVideoClient implements VideoModelClient {
         rec.durationSec = seconds;
       }
     }
-    rec.usage = this.fakeUsage(req, rec.durationSec);
+    rec.usage = this.fakeUsage(req, req.kind === 'extension' ? seconds : rec.durationSec, rec.durationSec);
     rec.status = 'completed';
     this.log.info({ interactionId: rec.id, durationSec: rec.durationSec }, 'mock turn completed');
   }
@@ -264,11 +272,11 @@ export class MockVideoClient implements VideoModelClient {
     width: number,
     height: number,
     imagePath: string | null,
-  ): Promise<{ file: string; durationSec: number }> {
+  ): Promise<{ file: string; durationSec: number; standIn: boolean }> {
     const prev = req.previousInteractionId ? this.interactions.get(req.previousInteractionId) : undefined;
     if (prev && prev.status === 'in_progress') await this.complete(prev);
     if (prev?.videoFile && existsSync(join(dir, prev.videoFile))) {
-      return { file: prev.videoFile, durationSec: prev.durationSec };
+      return { file: prev.videoFile, durationSec: prev.durationSec, standIn: false };
     }
     const file = `standin-${randomUUID()}.mp4`;
     await this.media.synthesizeClip({
@@ -279,7 +287,7 @@ export class MockVideoClient implements VideoModelClient {
       label: 'Mock part 1 stand-in',
       imagePath,
     });
-    return { file, durationSec: SEGMENT_SECONDS };
+    return { file, durationSec: SEGMENT_SECONDS, standIn: true };
   }
 
   private localImage(dir: string, req: VideoTurnRequest): string | null {
@@ -291,13 +299,20 @@ export class MockVideoClient implements VideoModelClient {
     return existsSync(path) ? path : null;
   }
 
-  private fakeUsage(req: VideoTurnRequest, outputSeconds: number): UsageInfo | null {
+  /**
+   * Usage in the shape the Interactions API reports. The extension is billed like the configured
+   * `EXTENSION_BILLING`: the new seconds only (the previous clip counts as input context), or the
+   * whole returned clip.
+   */
+  private fakeUsage(req: VideoTurnRequest, newSeconds: number, returnedSeconds: number): UsageInfo | null {
     const pricing = this.config.pricing;
     const tps = pricing.videoTokensPerSecond[req.resolution];
     const promptTokens = Math.ceil(req.prompt.length / 4);
     const imageTokens = req.image ? pricing.imageInputTokens : 0;
     const videoIn = req.kind === 'extension' ? SEGMENT_SECONDS * pricing.videoInputTokensPerSecond : 0;
-    const videoOut = Math.round(outputSeconds * tps);
+    const billedSeconds =
+      req.kind === 'extension' && pricing.extensionBilling === 'full_output' ? returnedSeconds : newSeconds;
+    const videoOut = Math.round(billedSeconds * tps);
     const input = promptTokens + imageTokens + videoIn;
     const inputByModality = [
       { modality: 'text', tokens: promptTokens },
@@ -344,6 +359,12 @@ export class MockVideoClient implements VideoModelClient {
       if (rec.createdAt >= cutoff || rec.status === 'in_progress') continue;
       this.interactions.delete(id);
       if (dir && rec.videoFile) await rm(join(dir, rec.videoFile), { force: true }).catch(() => undefined);
+    }
+    const uploadCutoff = this.now() - MOCK_FILE_TTL_MS;
+    for (const [name, at] of this.uploads) {
+      if (at >= uploadCutoff) continue;
+      this.uploads.delete(name);
+      if (dir) await rm(join(dir, name), { force: true }).catch(() => undefined);
     }
   }
 }

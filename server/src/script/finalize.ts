@@ -6,18 +6,21 @@
 import {
   LIMITS,
   SEGMENT_SECONDS,
+  SPEAKING_SECONDS,
+  SPEECH_WINDOWS,
+  TOTAL_SECONDS,
   estimateSpokenSeconds,
   type GenerationSettings,
   type ScriptPlan,
   type SegmentPlan,
 } from '../shared/api.js';
-import { buildPart1Prompt, buildPart2Prompt, defaultVoice, SPEECH_END_SEC, STYLE_DEFAULTS } from './prompts.js';
+import { buildPart1Prompt, buildPart2Prompt, defaultVoice, STYLE_DEFAULTS } from './prompts.js';
 import { cleanText, isEnglish, languageName, normalizeLanguage } from './text.js';
 
 export const FIELD_LIMITS = {
   character: 400,
   setting: 300,
-  voice: 250,
+  voice: LIMITS.voiceHintMaxChars,
   audio: 250,
   action: 400,
   camera: 250,
@@ -27,11 +30,15 @@ export const FIELD_LIMITS = {
   warnings: 8,
 } as const;
 
-/** Comfortable speech per 10s part: speech runs from about 1s to 8.5s. */
-const PART_SPEECH_BUDGET_SEC = SPEECH_END_SEC;
-const TOTAL_SPEECH_BUDGET_SEC = 2 * SEGMENT_SECONDS;
-const TARGET_WORDS_TOTAL = Math.round(TOTAL_SPEECH_BUDGET_SEC * LIMITS.wordsPerSecond);
-const TARGET_WORDS_PART = Math.round(PART_SPEECH_BUDGET_SEC * LIMITS.wordsPerSecond);
+/** Seconds of speech that fit in each part's speaking window (about 7.5s). */
+const PART_WINDOW_SEC = [
+  SPEECH_WINDOWS.part1.end - SPEECH_WINDOWS.part1.start,
+  SPEECH_WINDOWS.part2.end - SPEECH_WINDOWS.part2.start,
+] as const;
+/** Words that fit comfortably in `seconds` of speech (39 for the whole 20s video). */
+export function wordsThatFit(seconds: number): number {
+  return Math.floor(seconds * LIMITS.wordsPerSecond);
+}
 
 /** Warnings produced here; stripped from incoming plans before recomputing so they never pile up. */
 const COMPUTED_WARNING = [
@@ -63,16 +70,21 @@ export function computePlanWarnings(plan: Pick<ScriptPlan, 'segments' | 'languag
   const warnings: string[] = [];
   const [d1, d2] = [plan.segments[0].dialogue, plan.segments[1].dialogue];
   const total = estimateSpokenSeconds(`${d1} ${d2}`);
-  if (total > TOTAL_SPEECH_BUDGET_SEC) {
+  if (total > SPEAKING_SECONDS) {
+    const effect =
+      total > TOTAL_SECONDS
+        ? 'it will not fit and speech will be rushed or cut'
+        : 'it may sound rushed near the 10s seam';
     warnings.push(
-      `Script needs about ${fmtSec(total)}s to speak; it may be rushed or cut. Aim for about ${TARGET_WORDS_TOTAL} words.`,
+      `Script needs about ${fmtSec(total)}s of speech but about ${SPEAKING_SECONDS}s fits in a 20s video; ${effect}. Aim for about ${wordsThatFit(SPEAKING_SECONDS)} words.`,
     );
   }
   [d1, d2].forEach((d, i) => {
     const s = estimateSpokenSeconds(d);
-    if (s > PART_SPEECH_BUDGET_SEC) {
+    const window = PART_WINDOW_SEC[i] ?? SPEAKING_SECONDS / 2;
+    if (s > window) {
       warnings.push(
-        `Part ${i + 1} dialogue needs about ${fmtSec(s)}s but should end by about ${SPEECH_END_SEC}s of its 10s part; it may sound rushed. Aim for about ${TARGET_WORDS_PART} words per part.`,
+        `Part ${i + 1} dialogue needs about ${fmtSec(s)}s but its speaking window is about ${fmtSec(window)}s; it may sound rushed. Aim for about ${wordsThatFit(window)} words in this part.`,
       );
     }
   });

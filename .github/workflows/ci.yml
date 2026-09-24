@@ -61,13 +61,15 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium chrome
 
       - name: End-to-end tests (mock Gemini)
         run: npm run test:e2e
         env:
           E2E_DATABASE_URL: postgres://postgres:postgres@localhost:5432/omni_ugc_test
+          # Google Chrome can decode H.264/AAC, so the desktop run also verifies real playback.
+          PW_CHANNEL: chrome
 
       - name: Upload Playwright report
         if: failure()

@@ -9,14 +9,14 @@ Both need PostgreSQL 14+ and shared object storage (`STORAGE_DRIVER=s3`) unless 
 
 Minimum production settings:
 
-| Variable | Why |
-| --- | --- |
-| `GEMINI_API_KEY` | Gemini API key with billing enabled (Omni has no free tier). |
+| Variable                         | Why                                                                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`                 | Gemini API key with billing enabled (Omni has no free tier).                                       |
 | `APP_PASSWORD`, `SESSION_SECRET` | Protect the UI. `SESSION_SECRET` must be 32+ random characters and the same on every web instance. |
-| `DATABASE_URL` | PostgreSQL connection string. |
-| `STORAGE_DRIVER=s3` + `S3_*` | Shared storage for videos and images. |
-| `PUBLIC_ORIGIN` | The public URL, e.g. `https://ugc.example.com` (Origin check). |
-| `DAILY_BUDGET_USD` | Recommended hard cap on daily spend. |
+| `DATABASE_URL`                   | PostgreSQL connection string.                                                                      |
+| `STORAGE_DRIVER=s3` + `S3_*`     | Shared storage for videos and images.                                                              |
+| `PUBLIC_ORIGIN`                  | The public URL, e.g. `https://ugc.example.com` (Origin check).                                     |
+| `DAILY_BUDGET_USD`               | Recommended hard cap on daily spend.                                                               |
 
 ## Option A: Google Cloud Run (recommended)
 
@@ -107,4 +107,5 @@ This runs Postgres, the web service on port 8080 and a worker, sharing a local v
 - **Migrations:** run automatically at startup (`MIGRATE_ON_START=true`) under a Postgres advisory lock, so concurrent instances are safe. Manual: `npm run migrate --workspace server`.
 - **Spend control:** `DAILY_BUDGET_USD` blocks new jobs when today's spend plus in-flight estimates would exceed it. Google also enforces spend-based rate limits per project (e.g. $10 per rolling 10 minutes on Tier 1); those surface as `rate_limited` and are retried with backoff.
 - **Retention:** generated files stay in Google's Files API for 48 hours; the worker copies every output to your storage right away. Interactions are retained 55 days on the paid tier, which bounds how long "Regenerate part 2 only" stays available.
-- **Scaling:** raise `WORKER_CONCURRENCY` or the number of worker instances. Each job spends most of its time waiting on Gemini, so 2-4 concurrent jobs per vCPU is reasonable; ffmpeg work is short.
+- **Scaling:** `OMNI_MAX_CONCURRENT_TURNS` (default 1) is the real throughput limit: it caps Omni turns running at once across all workers, because parallel streams on one API key are reported to get cut. With the default, one worker instance and `WORKER_CONCURRENCY=2` are enough (the second job plans and uploads while the first one generates). Raise the cap only after confirming your key handles parallel turns, then add worker concurrency or instances.
+- **Transport:** turns stream by default (`OMNI_TRANSPORT=stream`). If Google rejects a transport the worker switches automatically and stores that decision in the `app_state` table for 7 days; delete the `omni_unsupported_transports` row to reset it.

@@ -8,14 +8,26 @@ import { loadConfig, type AppConfig } from '../src/config.js';
 import { VideoModelError, type VideoTurnRequest } from '../src/core/ports.js';
 import { classifyGeminiError } from '../src/gemini/errors.js';
 import type { GenAiLike } from '../src/gemini/genai.js';
-import { buildTurnRequest, GeminiVideoClient, mapInteraction } from '../src/gemini/video-client.js';
+import {
+  applyStreamEvent,
+  buildTurnRequest,
+  GeminiVideoClient,
+  mapInteraction,
+  newStreamedInteraction,
+  stripImageTags,
+} from '../src/gemini/video-client.js';
 
 const API_KEY = 'AIzaSyTEST-key-0123456789abcdefghijklmnop';
 const FILE_URI = 'https://generativelanguage.googleapis.com/v1beta/files/abc123';
 const logger = pino({ level: 'silent' });
 
-function testConfig(): AppConfig {
-  return loadConfig({ NODE_ENV: 'test', GEMINI_API_KEY: API_KEY, GEMINI_REQUEST_TIMEOUT_SEC: '600' });
+function testConfig(transport: 'stream' | 'background' = 'background'): AppConfig {
+  return loadConfig({
+    NODE_ENV: 'test',
+    GEMINI_API_KEY: API_KEY,
+    GEMINI_REQUEST_TIMEOUT_SEC: '600',
+    OMNI_TRANSPORT: transport,
+  });
 }
 
 function req(over: Partial<VideoTurnRequest> = {}): VideoTurnRequest {
@@ -55,17 +67,51 @@ function apiError(status: number, message: string, statusText?: string) {
   });
 }
 
-function client(ai: GenAiLike, fetchImpl?: typeof fetch) {
+function client(ai: GenAiLike, fetchImpl?: typeof fetch, transport: 'stream' | 'background' = 'background') {
   return new GeminiVideoClient({
-    config: testConfig(),
+    config: testConfig(transport),
     logger,
     ai,
     fetchImpl,
     sleep: async () => undefined,
     fileActiveTimeoutMs: 5_000,
     filePollIntervalMs: 1,
+    createAckTimeoutMs: 1_000,
   });
 }
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/** A fake SSE stream: yields `events`, waits for `hold` after the first one, then optionally fails. */
+function sseStream(events: unknown[], opts: { hold?: Promise<void>; failWith?: Error; signal?: AbortSignal } = {}) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const [i, event] of events.entries()) {
+        if (i === 1 && opts.hold) await opts.hold;
+        if (opts.signal?.aborted) throw Object.assign(new Error('Request aborted by client'), { name: 'AbortError' });
+        yield event;
+      }
+      if (opts.failWith) throw opts.failWith;
+    },
+  };
+}
+
+const created = (id: string) => ({
+  event_type: 'interaction.created',
+  event_id: 'e1',
+  interaction: { id, status: 'in_progress' },
+});
 
 let dir: string;
 beforeAll(async () => {
@@ -98,6 +144,16 @@ describe('buildTurnRequest', () => {
     expect(params).not.toHaveProperty('background');
     const text = (params.input as { type: string; text?: string }[])[1]!.text!;
     expect(text.startsWith('<FIRST_FRAME>')).toBe(true);
+  });
+
+  it('drops a stray <FIRST_FRAME> tag from a reference-mode prompt', () => {
+    const params = buildTurnRequest(req({ prompt: '<FIRST_FRAME> A person talks to camera.' }), 'm', {
+      background: false,
+      includeDuration: true,
+    });
+    const text = (params.input as { text?: string }[])[1]!.text!;
+    expect(text).not.toContain('<FIRST_FRAME>');
+    expect(text).toContain('<IMAGE_REF_0>');
   });
 
   it('adds an <IMAGE_REF_0> binding when a reference prompt forgot it', () => {
@@ -155,6 +211,28 @@ describe('buildTurnRequest', () => {
         includeDuration: true,
       }),
     ).toThrow(/part 1 interaction id/);
+  });
+
+  it('marks a streamed turn with stream: true and never with background', () => {
+    const p = buildTurnRequest(req(), 'm', { background: true, stream: true, includeDuration: true });
+    expect(p.stream).toBe(true);
+    expect(p).not.toHaveProperty('background');
+  });
+
+  it('drops image tags from an extension prompt sent without the image', () => {
+    const params = buildTurnRequest(
+      req({
+        kind: 'extension',
+        image: null,
+        previousInteractionId: 'int-1',
+        prompt:
+          'Extend this video.\nThe person is the same person shown in <IMAGE_REF_0>; keep the face as in <IMAGE_REF_0>.\nSame voice.',
+      }),
+      'm',
+      { background: false, includeDuration: true },
+    );
+    expect(params.input).toBe('Extend this video.\nSame voice.');
+    expect(stripImageTags('No tags here.')).toBe('No tags here.');
   });
 
   it('clamps the duration string to 3-10 seconds', () => {
@@ -443,29 +521,37 @@ describe('classifyGeminiError', () => {
 });
 
 describe('GeminiVideoClient with a fake SDK', () => {
-  it('creates turns with maxRetries 0 and falls back to blocking calls when background is rejected', async () => {
+  it('creates turns with maxRetries 0 and switches from background to streaming, then to blocking', async () => {
     const ai = fakeAi();
     ai.interactions.create
       .mockRejectedValueOnce(apiError(400, 'background is not supported for this model', 'INVALID_ARGUMENT'))
+      .mockRejectedValueOnce(apiError(400, 'Streaming is not supported for this model', 'INVALID_ARGUMENT'))
       .mockResolvedValueOnce({ id: 'int-1', status: 'completed', output_video: { type: 'video', data: 'AAAA' } })
       .mockResolvedValueOnce({ id: 'int-2', status: 'completed', output_video: { type: 'video', data: 'BBBB' } });
     const c = client(ai);
+    expect(c.transport).toBe('background');
     const s = await c.startTurn(req());
     expect(s).toMatchObject({ id: 'int-1', status: 'completed', video: { inlineData: 'AAAA' } });
-    expect(ai.interactions.create).toHaveBeenCalledTimes(2);
-    const [first, second] = ai.interactions.create.mock.calls as [
+    expect(ai.interactions.create).toHaveBeenCalledTimes(3);
+    const [first, second, third] = ai.interactions.create.mock.calls as [
       Record<string, unknown>,
-      { maxRetries: number; timeout: number },
+      { maxRetries: number; timeout: number; signal?: AbortSignal },
     ][];
     expect(first![0].background).toBe(true);
+    expect(first![0]).not.toHaveProperty('stream');
+    expect(second![0].stream).toBe(true);
     expect(second![0]).not.toHaveProperty('background');
-    expect(first![1].maxRetries).toBe(0);
-    expect(second![1]).toEqual({ maxRetries: 0, timeout: 600_000 });
+    expect(third![0]).not.toHaveProperty('background');
+    expect(third![0]).not.toHaveProperty('stream');
+    for (const call of [first, second, third]) expect(call![1].maxRetries).toBe(0);
+    expect(first![1].timeout).toBe(1_000);
+    expect(third![1]).toEqual({ maxRetries: 0, timeout: 600_000 });
+    expect(c.transport).toBe('blocking');
     expect(c.usesBackground).toBe(false);
 
     await c.startTurn(req());
-    expect(ai.interactions.create).toHaveBeenCalledTimes(3);
-    expect(ai.interactions.create.mock.calls[2]![0]).not.toHaveProperty('background');
+    expect(ai.interactions.create).toHaveBeenCalledTimes(4);
+    expect(ai.interactions.create.mock.calls[3]![0]).not.toHaveProperty('background');
   });
 
   it('retries an extension once without duration when duration is rejected, and remembers it', async () => {
@@ -523,15 +609,19 @@ describe('GeminiVideoClient with a fake SDK', () => {
     expect(ai.interactions.create).toHaveBeenCalledTimes(2);
   });
 
-  it('polls, maps not_found and ignores cancel of finished interactions', async () => {
+  it('polls, reports unreadable interactions as lost (to be recreated) and ignores cancel of finished ones', async () => {
     const ai = fakeAi();
     ai.interactions.get.mockResolvedValueOnce({ id: 'int-1', status: 'in_progress' });
     ai.interactions.get.mockRejectedValueOnce(apiError(404, 'Not found', 'NOT_FOUND'));
+    ai.interactions.get.mockRejectedValueOnce(apiError(503, 'The model is overloaded', 'UNAVAILABLE'));
     ai.interactions.cancel.mockRejectedValueOnce(apiError(400, 'Interaction is not running'));
     const c = client(ai);
     expect((await c.getInteraction('int-1')).status).toBe('in_progress');
-    await expect(c.getInteraction('int-1')).rejects.toMatchObject({ code: 'not_found', retryable: false });
+    await expect(c.getInteraction('int-1')).rejects.toMatchObject({ code: 'interaction_lost', retryable: true });
+    await expect(c.getInteraction('int-1')).rejects.toMatchObject({ code: 'upstream_unavailable', retryable: true });
     await expect(c.cancel('int-1')).resolves.toBeUndefined();
+    // Only a background interaction created by this process switches the transport.
+    expect(c.transport).toBe('background');
   });
 
   it('reports mock interaction ids as lost instead of calling Google', async () => {
@@ -636,6 +726,21 @@ describe('GeminiVideoClient with a fake SDK', () => {
     expect(seen[1]!.headers).not.toHaveProperty('x-goog-api-key');
   });
 
+  it('refuses to follow a download redirect to plain http', async () => {
+    const ai = fakeAi();
+    ai.files.get.mockResolvedValue({ name: 'files/vid7', state: 'ACTIVE' });
+    const fetchImpl = (async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://example.com/vid7.mp4' },
+      })) as unknown as typeof fetch;
+    const dest = join(dir, 'insecure.mp4');
+    await expect(
+      client(ai, fetchImpl).downloadVideo({ uri: 'files/vid7', mimeType: 'video/mp4', inlineData: null }, dest),
+    ).rejects.toMatchObject({ code: 'invalid_output', retryable: false });
+    expect(existsSync(`${dest}.part`)).toBe(false);
+  });
+
   it('maps a failed download to a retryable error and leaves no partial file', async () => {
     const ai = fakeAi();
     ai.files.get.mockRejectedValue(apiError(403, 'forbidden', 'PERMISSION_DENIED'));
@@ -647,5 +752,214 @@ describe('GeminiVideoClient with a fake SDK', () => {
     ).rejects.toMatchObject({ code: 'output_not_found', retryable: true });
     expect(existsSync(dest)).toBe(false);
     expect(existsSync(`${dest}.part`)).toBe(false);
+  });
+});
+
+describe('GeminiVideoClient stream transport (OMNI_TRANSPORT=stream, the default)', () => {
+  it('uses the stream transport by default', () => {
+    const c = new GeminiVideoClient({
+      config: loadConfig({ NODE_ENV: 'test', GEMINI_API_KEY: API_KEY }),
+      logger,
+      ai: fakeAi(),
+    });
+    expect(c.transport).toBe('stream');
+  });
+
+  it('returns as soon as the interaction id arrives, then serves the streamed result from memory', async () => {
+    const ai = fakeAi();
+    const hold = deferred();
+    const events = [
+      created('int-s1'),
+      { event_type: 'interaction.status_update', interaction_id: 'int-s1', status: 'in_progress' },
+      { event_type: 'step.start', index: 0, step: { type: 'thought', summary: [] } },
+      { event_type: 'step.start', index: 1, step: { type: 'model_output', content: [] } },
+      { event_type: 'step.delta', index: 1, delta: { type: 'video', uri: FILE_URI, mime_type: 'video/mp4' } },
+      { event_type: 'step.stop', index: 1, usage: { total_input_tokens: 1500, total_output_tokens: 57920 } },
+      { event_type: 'interaction.completed', event_id: 'e9', interaction: { id: 'int-s1', status: 'completed' } },
+    ];
+    ai.interactions.create.mockImplementation(async (_params, options) =>
+      sseStream(events, { hold: hold.promise, signal: options?.signal }),
+    );
+    const c = client(ai, undefined, 'stream');
+    const started = await c.startTurn(req());
+    expect(started).toEqual({ id: 'int-s1', status: 'in_progress', video: null, usage: null, error: null });
+    const [params, options] = ai.interactions.create.mock.calls[0] as [
+      Record<string, unknown>,
+      { maxRetries: number; timeout: number; signal?: AbortSignal },
+    ];
+    expect(params.stream).toBe(true);
+    expect(params).not.toHaveProperty('background');
+    expect(params.response_format).toEqual({
+      type: 'video',
+      aspect_ratio: '9:16',
+      duration: '10s',
+      resolution: '720p',
+      delivery: 'uri',
+    });
+    expect(options.maxRetries).toBe(0);
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.timeout).toBeGreaterThanOrEqual(1_500_000);
+
+    expect((await c.getInteraction('int-s1')).status).toBe('in_progress');
+    hold.resolve();
+    await vi.waitFor(async () => expect((await c.getInteraction('int-s1')).status).toBe('completed'));
+    const done = await c.getInteraction('int-s1');
+    expect(done.video).toEqual({ uri: FILE_URI, mimeType: 'video/mp4', inlineData: null });
+    expect(done.usage?.outputTokens).toBe(57920);
+    expect(ai.interactions.get).not.toHaveBeenCalled();
+  });
+
+  it('reads the stored interaction when the stream finished without a video part', async () => {
+    const ai = fakeAi();
+    ai.interactions.create.mockResolvedValue(
+      sseStream([
+        created('int-s2'),
+        { event_type: 'interaction.completed', interaction: { id: 'int-s2', status: 'completed' } },
+      ]),
+    );
+    ai.interactions.get.mockResolvedValue({
+      id: 'int-s2',
+      status: 'completed',
+      output_video: { type: 'video', uri: FILE_URI, mime_type: 'video/mp4' },
+    });
+    const c = client(ai, undefined, 'stream');
+    await c.startTurn(req());
+    await vi.waitFor(async () => expect((await c.getInteraction('int-s2')).video?.uri).toBe(FILE_URI));
+  });
+
+  it('falls back to polling when the stream is cut, and reports the turn lost when it cannot be read', async () => {
+    const ai = fakeAi();
+    const cut = Object.assign(new TypeError('terminated'), {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    });
+    ai.interactions.create
+      .mockResolvedValueOnce(sseStream([created('int-s3')], { failWith: cut }))
+      .mockResolvedValueOnce(sseStream([created('int-s4')], { failWith: cut }));
+    ai.interactions.get
+      .mockResolvedValueOnce({ id: 'int-s3', status: 'in_progress' })
+      .mockResolvedValueOnce({ id: 'int-s3', status: 'completed', output_video: { type: 'video', data: 'AAAA' } })
+      .mockRejectedValueOnce(apiError(404, 'Interaction not found', 'NOT_FOUND'));
+    const c = client(ai, undefined, 'stream');
+
+    await c.startTurn(req());
+    await flush();
+    // The stream was cut before a terminal event: the next polls read the stored interaction.
+    expect((await c.getInteraction('int-s3')).status).toBe('in_progress');
+    const done = await c.getInteraction('int-s3');
+    expect(done).toMatchObject({ status: 'completed', video: { inlineData: 'AAAA' } });
+    expect(ai.interactions.get).toHaveBeenCalledTimes(2);
+
+    await c.startTurn(req());
+    await flush();
+    await expect(c.getInteraction('int-s4')).rejects.toMatchObject({ code: 'interaction_lost', retryable: true });
+  });
+
+  it('applies request downgrades when the stream rejects the request with an invalid-argument error event', async () => {
+    const ai = fakeAi();
+    ai.interactions.create
+      .mockResolvedValueOnce(
+        sseStream([
+          {
+            event_type: 'error',
+            error: { code: 'invalid_argument', message: 'Duration cannot be set in response format for extend task' },
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(sseStream([created('int-s6')]));
+    const c = client(ai, undefined, 'stream');
+    const ext = req({ kind: 'extension', image: null, previousInteractionId: 'int-1', prompt: 'Extend this video.' });
+    expect((await c.startTurn(ext)).id).toBe('int-s6');
+    const calls = ai.interactions.create.mock.calls as unknown as [{ response_format: Record<string, unknown> }][];
+    expect(calls[0]![0].response_format.duration).toBe('10s');
+    expect(calls[1]![0].response_format).not.toHaveProperty('duration');
+  });
+
+  it('maps an error event before the interaction id to a classified error', async () => {
+    const ai = fakeAi();
+    ai.interactions.create.mockResolvedValue(
+      sseStream([
+        {
+          event_type: 'error',
+          error: { code: 'safety', message: "Input blocked: we can't create videos with real people's likenesses" },
+        },
+      ]),
+    );
+    const c = client(ai, undefined, 'stream');
+    await expect(c.startTurn(req())).rejects.toMatchObject({ code: 'safety_blocked', retryable: false });
+    expect(ai.interactions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('times out when the stream sends no interaction id', async () => {
+    const ai = fakeAi();
+    let signal: AbortSignal | undefined;
+    ai.interactions.create.mockImplementation(async (_params, options) => {
+      signal = options?.signal;
+      // A stream that never sends an event.
+      return {
+        [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<unknown>>(() => undefined) }),
+      };
+    });
+    const c = client(ai, undefined, 'stream');
+    await expect(c.startTurn(req())).rejects.toMatchObject({ code: 'timeout', retryable: true });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('cancels a streamed turn by closing the stream', async () => {
+    const ai = fakeAi();
+    const hold = deferred();
+    let signal: AbortSignal | undefined;
+    ai.interactions.create.mockImplementation(async (_params, options) => {
+      signal = options?.signal;
+      return sseStream([created('int-s5'), { event_type: 'interaction.status_update', status: 'in_progress' }], {
+        hold: hold.promise,
+        signal,
+      });
+    });
+    ai.interactions.cancel.mockRejectedValue(apiError(400, 'Only background interactions can be cancelled'));
+    const c = client(ai, undefined, 'stream');
+    await c.startTurn(req());
+    await c.cancel('int-s5');
+    expect(signal?.aborted).toBe(true);
+    hold.resolve();
+    await vi.waitFor(async () => expect((await c.getInteraction('int-s5')).status).toBe('cancelled'));
+  });
+
+  it('switches to streaming when a background interaction cannot be polled', async () => {
+    const ai = fakeAi();
+    ai.interactions.create.mockResolvedValueOnce({ id: 'int-b1', status: 'in_progress' });
+    ai.interactions.get.mockRejectedValueOnce(
+      apiError(403, 'The caller does not have permission', 'PERMISSION_DENIED'),
+    );
+    const c = client(ai);
+    expect((await c.startTurn(req())).id).toBe('int-b1');
+    await expect(c.getInteraction('int-b1')).rejects.toMatchObject({ code: 'interaction_lost', retryable: true });
+    expect(c.transport).toBe('stream');
+  });
+});
+
+describe('applyStreamEvent', () => {
+  it('assembles chunked inline video data and keeps the terminal status', () => {
+    const acc = newStreamedInteraction();
+    applyStreamEvent(acc, created('int-x'));
+    applyStreamEvent(acc, {
+      event_type: 'step.delta',
+      index: 2,
+      delta: { type: 'video', data: 'AAAA', mime_type: 'video/mp4' },
+    });
+    applyStreamEvent(acc, { event_type: 'step.delta', index: 2, delta: { type: 'video', data: 'BBBB' } });
+    applyStreamEvent(acc, { event_type: 'interaction.completed', interaction: { id: 'int-x', status: 'completed' } });
+    applyStreamEvent(acc, { event_type: 'interaction.status_update', status: 'in_progress' });
+    expect(acc.id).toBe('int-x');
+    expect(acc.status).toBe('completed');
+    const state = mapInteraction({ id: acc.id, status: acc.status, steps: acc.steps });
+    expect(state.video).toEqual({ uri: null, mimeType: 'video/mp4', inlineData: 'AAAABBBB' });
+  });
+
+  it('records error events as a failed turn', () => {
+    const acc = newStreamedInteraction();
+    applyStreamEvent(acc, created('int-y'));
+    applyStreamEvent(acc, { event_type: 'error', error: { message: 'Output blocked by safety filters' } });
+    const state = mapInteraction({ id: 'int-y', status: acc.status, errors: acc.errors });
+    expect(state).toMatchObject({ status: 'failed', error: { code: 'safety_blocked', retryable: false } });
   });
 });

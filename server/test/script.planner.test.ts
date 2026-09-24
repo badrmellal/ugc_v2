@@ -11,7 +11,7 @@ import {
   PLAN_JSON_SCHEMA,
   SPLIT_SYSTEM_INSTRUCTION,
 } from '../src/script/planner.js';
-import { buildPart1Prompt, buildPart2Prompt } from '../src/script/prompts.js';
+import { actionSentence, buildPart1Prompt, buildPart2Prompt } from '../src/script/prompts.js';
 import { DEFAULT_SETTINGS, type GenerationSettings, type ScriptPlan } from '../src/shared/api.js';
 
 const EM_DASH = String.fromCharCode(0x2014);
@@ -39,7 +39,7 @@ describe('DefaultScriptPlanner.split', () => {
     expect(result.costUsd).toBeLessThan(0.05);
     const [a, b] = result.plan.segments;
     expect(`${a.dialogue} ${b.dialogue}`).toBe(SCRIPT);
-    expect(a.prompt).toContain(`says: "${a.dialogue}"`);
+    expect(a.prompt).toContain(`says, with natural lip sync: "${a.dialogue}"`);
     expect(b.prompt.startsWith('Extend this video.')).toBe(true);
   });
 
@@ -184,15 +184,18 @@ describe('DefaultScriptPlanner.finalize and prompts', () => {
     expect(plan.segments[1].prompt.startsWith('Extend this video.')).toBe(true);
   });
 
-  it('repeats the continuity bible verbatim in both prompts and ends speech by 8.5s', () => {
+  it('repeats the continuity bible verbatim in both prompts and keeps speech inside SPEECH_WINDOWS', () => {
     const plan = base();
     for (const field of [plan.character, plan.setting, plan.voice, plan.audio]) {
       const needle = field.replace(/[.]$/, '');
       expect(plan.segments[0].prompt).toContain(needle);
       expect(plan.segments[1].prompt).toContain(needle);
     }
-    expect(plan.segments[0].prompt).toMatch(/\[1-8\.5s\]/);
-    expect(plan.segments[1].prompt).toMatch(/\[0\.5-8\.5s\]/);
+    // Part 1 speaks 0.5-8s and part 2 0.8-8.5s, leaving about 2s of silence around the seam.
+    expect(plan.segments[0].prompt).toContain('[0.5-8s]');
+    expect(plan.segments[0].prompt).toContain('[8-10s]');
+    expect(plan.segments[1].prompt).toContain('[0-0.8s]');
+    expect(plan.segments[1].prompt).toContain('[0.8-8.5s]');
     expect(plan.segments[0].prompt).toContain('No text overlay on screen.');
     expect(plan.segments[0].prompt).toContain('No background music.');
     expect(plan.segments[0].prompt.length).toBeLessThan(1300);
@@ -215,7 +218,7 @@ describe('DefaultScriptPlanner.finalize and prompts', () => {
     expect(out.source).toBe('user');
     expect(out.language).toBe('fr');
     expect(out.segments[0].dialogue).toBe('New opening line, with a pause.');
-    expect(out.segments[0].prompt).toContain('says: "New opening line, with a pause."');
+    expect(out.segments[0].prompt).toContain('says, with natural lip sync: "New opening line, with a pause."');
     expect(out.segments[0].prompt).not.toContain('<FIRST_FRAME>');
     expect(out.segments[0].prompt).toContain('The presenter speaks French.');
     expect(out.segments[1].prompt).toContain('The presenter speaks French.');
@@ -279,6 +282,11 @@ describe('DefaultScriptPlanner.finalize and prompts', () => {
     expect(buildPart2Prompt(plan, settings())).toBe(plan.segments[1].prompt);
   });
 
+  it('tells the splitter the same speaking budget as the UI (about 39 words, 7.5s per part)', () => {
+    expect(SPLIT_SYSTEM_INSTRUCTION).toContain('About 15 seconds of speech (about 39 words)');
+    expect(SPLIT_SYSTEM_INSTRUCTION).toContain('at most about 7.5 seconds of speech');
+  });
+
   it('never sends U+2014 to the text model', () => {
     expect(SPLIT_SYSTEM_INSTRUCTION).not.toContain(EM_DASH);
     expect(JSON.stringify(PLAN_JSON_SCHEMA)).not.toContain(EM_DASH);
@@ -325,6 +333,32 @@ describe('verbatim check with ambiguous parentheticals', () => {
   it('treats "(she leans in)" style cues as directions in the fallback', () => {
     const plan = fallbackPlan('Here is the secret (she leans in) nobody tells you about sleep.', settings());
     expect(plan.segments[0].dialogue).toBe('Here is the secret nobody tells you about sleep.');
-    expect(plan.segments[0].action).toBe('she leans in');
+    expect(plan.segments[0].action).toBe('leans in');
+    expect(plan.segments[0].prompt).toContain('The person leans in. The person in <IMAGE_REF_0> says, with natural lip sync:');
+  });
+
+  it('writes several cues as one grammatical action sentence', () => {
+    const plan = fallbackPlan(
+      '(smiles) Stop scrolling, this changed my skin. [holds up the jar] Link in bio.',
+      settings(),
+    );
+    expect(plan.segments[0].action).toBe('smiles; holds up the jar');
+    expect(plan.segments[0].prompt).toContain('The person smiles, then holds up the jar.');
+    expect(actionSentence('The person', 'She walks into frame')).toBe('The person walks into frame.');
+    expect(actionSentence('The person', 'Close-up of the jar. smiles')).toBe('Close-up of the jar. The person smiles.');
+  });
+
+  it('does not describe talking in a part without dialogue, and notes a mid-sentence split', () => {
+    const short = fallbackPlan('Hi.', settings());
+    expect(short.segments[1].dialogue).toBe('');
+    expect(short.segments[1].prompt).toContain('No dialogue.');
+    expect(short.segments[1].prompt).not.toMatch(/talking|explaining/);
+
+    const long = fallbackPlan(
+      'this sentence has no punctuation at all and it keeps going and going because nobody ever stopped the writer from rambling on about nothing',
+      settings(),
+    );
+    expect(long.segments[1].dialogue).not.toBe('');
+    expect(long.segments[0].prompt).toContain('pauses briefly mid-thought');
   });
 });

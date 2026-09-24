@@ -2,12 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import type { GenerationRecord } from '../src/core/ports.js';
 import { helmetOptions, storageOrigins } from '../src/http/app.js';
-import { isAuthEnabled, passwordMatches, signSession, tokenMatches, verifySession } from '../src/http/auth.js';
+import {
+  isApiPath,
+  isAuthEnabled,
+  passwordMatches,
+  signSession,
+  tokenMatches,
+  verifySession,
+} from '../src/http/auth.js';
 import { startOfUtcDay } from '../src/http/budget.js';
 import { canRegeneratePart2, PART1_REUSE_MAX_AGE_MS, toGenerationDTO, toListItem } from '../src/http/dto.js';
 import { downloadFileName, etagMatches, ifRangeAllows, parseRange, slugify, weakEtag } from '../src/http/range.js';
 import { deriveTitle } from '../src/http/routes/generations.js';
 import { regenerateRequestSchema, settingsSchema, stripControlChars } from '../src/http/schemas.js';
+import { createErrorSerializer } from '../src/logger.js';
 import { DEFAULT_SETTINGS } from '../src/shared/api.js';
 
 const SECRET = 'unit-test-secret-unit-test-secret-0123456789';
@@ -130,6 +138,22 @@ describe('session tokens and credentials', () => {
     expect(tokenMatches('a', [])).toBe(false);
   });
 
+  it('recognizes API paths before and after percent-decoding', () => {
+    for (const url of [
+      '/api',
+      '/api/',
+      '/api/generations?x=1',
+      '/%61pi/generations',
+      '/ap%69/config',
+      '/api%2Fconfig',
+    ]) {
+      expect(isApiPath(url), url).toBe(true);
+    }
+    for (const url of ['/', '/apix', '/assets/api.js', '/%2561pi/generations', '/%E0%A4%A', '/history#/api/x']) {
+      expect(isApiPath(url), url).toBe(false);
+    }
+  });
+
   it('decides whether auth is enabled', () => {
     expect(isAuthEnabled(config({ APP_PASSWORD: 'pw' }))).toBe(true);
     expect(isAuthEnabled(config({ API_TOKENS: 'tok' }))).toBe(true);
@@ -174,6 +198,21 @@ describe('content security policy', () => {
   });
 });
 
+describe('error serializer', () => {
+  it('scrubs secrets and tolerates non-error rejection reasons', () => {
+    const serialize = createErrorSerializer(
+      config({ API_TOKENS: 'super-secret-token-123', GEMINI_API_KEY: 'AIzaSyA1234567890abcdefghijklmnopqrstu' }),
+    );
+    expect(serialize(null)).toBeNull();
+    expect(serialize(undefined)).toBeUndefined();
+    expect(serialize(42)).toBe(42);
+    expect(serialize('failed with super-secret-token-123')).toBe('failed with [REDACTED]');
+    const out = serialize(new Error('key=AIzaSyA1234567890abcdefghijklmnopqrstu rejected')) as Record<string, string>;
+    expect(out.message).toBe('key=[REDACTED] rejected');
+    expect(out.stack).not.toContain('AIza');
+  });
+});
+
 describe('request schemas', () => {
   it('fills settings defaults and strips control characters', () => {
     expect(settingsSchema.parse(undefined)).toEqual(DEFAULT_SETTINGS);
@@ -183,6 +222,8 @@ describe('request schemas', () => {
       voiceHint: 'deep voice',
     });
     expect(stripControlChars('a\u0000b\u001fc\td\ne\u007f')).toBe('abc\td\ne');
+    // Lone surrogates are dropped (Postgres jsonb rejects them); valid pairs such as emoji are kept.
+    expect(stripControlChars('a\ud800b\ud83d\ude00c\udc00')).toBe('ab\ud83d\ude00c');
     expect(settingsSchema.safeParse({ language: 'english please' }).success).toBe(false);
     expect(settingsSchema.safeParse({ language: 'pt-BR' }).success).toBe(true);
   });

@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.E2E_PORT ?? 8181);
 const chromiumPath = process.env.PW_CHROMIUM_PATH;
+/** `chrome` in CI: Google Chrome ships the H.264/AAC decoders that open-source Chromium lacks. */
+const desktopChannel = process.env.PW_CHANNEL;
 
 /**
  * End-to-end tests run the production build (web + server) in mock Gemini mode, so no API key is
@@ -22,7 +24,7 @@ export default defineConfig({
     ...(chromiumPath ? { launchOptions: { executablePath: chromiumPath } } : {}),
   },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'] } },
+    { name: 'desktop', use: { ...devices['Desktop Chrome'], ...(desktopChannel ? { channel: desktopChannel } : {}) } },
     { name: 'mobile', use: { ...devices['Pixel 7'] } },
   ],
   webServer: {

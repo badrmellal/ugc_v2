@@ -11,10 +11,12 @@ import {
   type GenerationDTO,
   type GenerationListResponse,
   type GenerationSettings,
+  type GenerationStatus,
   type ScriptPlan,
 } from '../../shared/api.js';
 import { generationKeys } from '../../storage/index.js';
-import { assertWithinBudget } from '../budget.js';
+import { withAdmissionLock } from '../admission.js';
+import { assertQueueCapacity, assertWithinBudget } from '../budget.js';
 import { PART1_REUSE_MAX_AGE_MS, toGenerationDTO, toListItem } from '../dto.js';
 import { conflict, HttpError, notFound, validationError } from '../errors.js';
 import { createGenerationPayloadSchema, isUuid, listQuerySchema, regenerateRequestSchema } from '../schemas.js';
@@ -47,6 +49,11 @@ function changedSettings(a: GenerationSettings, b: GenerationSettings): (keyof G
   return (Object.keys(a) as (keyof GenerationSettings)[]).filter((k) => a[k] !== b[k]);
 }
 
+function alreadyDone(status: GenerationStatus): string {
+  const done = status === 'succeeded' ? 'finished' : status === 'failed' ? 'failed' : 'been canceled';
+  return `This generation has already ${done}.`;
+}
+
 function createdByOf(req: FastifyRequest): string | null {
   const auth = req.auth;
   if (!auth || auth.method === 'none') return null;
@@ -76,17 +83,20 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
   const finalizeUserPlan = (plan: ScriptPlan, settings: GenerationSettings) =>
     finalizePlan({ ...plan, source: 'user' }, settings);
 
-  const assertQueueCapacity = async () => {
-    const active = await repo.countActive();
-    const max = config.worker.maxQueuedJobs;
-    if (active >= max) {
-      throw new HttpError(
-        429,
-        'queue_full',
-        `${active} videos are already queued or generating (limit ${max}). Wait for one to finish or cancel one, then try again.`,
-      );
-    }
-  };
+  /**
+   * Inserts a job after re-checking the queue and the budget under the admission lock, so parallel
+   * requests (on any instance) cannot all pass the checks. A regeneration also re-checks that its
+   * source still exists: a concurrent delete may have just removed the files it would reuse.
+   */
+  const admit = (g: NewGeneration): Promise<GenerationRecord> =>
+    withAdmissionLock(ctx.db, async (tx) => {
+      if (g.parentId && !(await tx.get(g.parentId))) {
+        throw notFound('The source generation was deleted.');
+      }
+      await assertQueueCapacity(tx, config.worker.maxQueuedJobs);
+      await assertWithinBudget(tx, config.budget.dailyUsd, g.estimatedCost.totalUsd);
+      return tx.insert(g);
+    });
 
   const dtoFor = async (g: GenerationRecord): Promise<GenerationDTO> => {
     const events = await repo.listEvents(g.id, 200);
@@ -118,8 +128,8 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
         'Send the generation as multipart/form-data with a "payload" JSON field and a "characterImage" file.',
       );
     }
-    // Cheap check first, before receiving up to 10 MB of image.
-    await assertQueueCapacity();
+    // Cheap check first, before receiving up to 10 MB of image (re-checked atomically on insert).
+    await assertQueueCapacity(repo, config.worker.maxQueuedJobs);
     const dir = await mkdtemp(join(tmpdir(), 'omni-upload-'));
     try {
       const upload = await readGenerationUpload(req, dir);
@@ -134,15 +144,26 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
         needsSplit: !plan,
         reinforceCharacterOnExtend: payload.settings.reinforceCharacterOnExtend,
       });
-      await assertWithinBudget(ctx, estimatedCost.totalUsd);
+      // Before the costly re-encode (re-checked atomically on insert).
+      await assertWithinBudget(repo, config.budget.dailyUsd, estimatedCost.totalUsd);
 
       // Re-encode to JPEG: auto-orients, strips EXIF/GPS metadata and caps the resolution.
       const normalized = join(dir, 'character.jpg');
       try {
         await ctx.media.normalizeImage(upload.image.path, normalized, CHARACTER_MAX_SIDE);
       } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'binary_not_found' || code === 'spawn_failed' || code === 'timeout' || code === 'no_output') {
+          // Server-side media processing fault, not a problem with the upload.
+          req.log.error({ err }, 'image processing failed');
+          throw new HttpError(
+            503,
+            'media_unavailable',
+            'Image processing is temporarily unavailable. Try again shortly.',
+          );
+        }
         req.log.info({ err }, 'character image could not be decoded');
-        if ((err as { code?: unknown }).code === 'image_too_large') {
+        if (code === 'image_too_large') {
           throw new HttpError(
             413,
             'payload_too_large',
@@ -162,7 +183,7 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
       await ctx.storage.putFile(keys.characterImage, normalized, 'image/jpeg');
       let record: GenerationRecord;
       try {
-        record = await repo.insert({
+        record = await admit({
           id,
           createdBy: createdByOf(req),
           title: deriveTitle(payload.script),
@@ -237,16 +258,14 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
       else if (changed.length) plan = finalizePlan(source.plan, settings);
       else plan = source.plan;
 
-      await assertQueueCapacity();
       const estimatedCost = estimateCost(config.pricing, {
         resolution: settings.resolution,
         mode: 'full',
         needsSplit: !plan,
         reinforceCharacterOnExtend: settings.reinforceCharacterOnExtend,
       });
-      await assertWithinBudget(ctx, estimatedCost.totalUsd);
 
-      const record = await repo.insert({
+      const record = await admit({
         ...shared,
         id: randomUUID(),
         title: script === source.script ? source.title : deriveTitle(script),
@@ -280,16 +299,14 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
       plan = finalizeUserPlan({ ...source.plan, segments: [first, { ...second, ...edits }] }, source.settings);
     }
 
-    await assertQueueCapacity();
     const estimatedCost = estimateCost(config.pricing, {
       resolution: source.settings.resolution,
       mode: 'part2',
       needsSplit: false,
       reinforceCharacterOnExtend: source.settings.reinforceCharacterOnExtend,
     });
-    await assertWithinBudget(ctx, estimatedCost.totalUsd);
 
-    const record = await repo.insert({
+    const record = await admit({
       ...shared,
       id: randomUUID(),
       script: source.script,
@@ -311,13 +328,17 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
 
   app.post<IdParams>('/api/generations/:id/cancel', async (req): Promise<GenerationDTO> => {
     const current = await loadGeneration(req.params.id);
-    if (isTerminalStatus(current.status)) {
-      throw conflict(`This generation has already ${current.status === 'succeeded' ? 'finished' : current.status}.`);
-    }
+    if (isTerminalStatus(current.status)) throw conflict(alreadyDone(current.status));
     const updated = await repo.requestCancel(current.id);
     if (!updated) throw notFound();
+    if (updated.status === 'succeeded' || updated.status === 'failed') {
+      // It finished between the read above and the cancel request.
+      throw conflict(alreadyDone(updated.status));
+    }
     if (updated.status === 'canceled') {
-      await repo.addEvent(updated.id, 'canceled', 'info', 'Canceled before it started');
+      if (current.status === 'queued') {
+        await repo.addEvent(updated.id, 'canceled', 'info', 'Canceled while waiting in the queue');
+      }
     } else if (!current.cancelRequested) {
       await repo.addEvent(updated.id, updated.stage, 'info', 'Cancel requested, stopping at the next checkpoint');
     }
@@ -326,25 +347,35 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
   });
 
   app.delete<IdParams>('/api/generations/:id', async (req, reply) => {
-    const g = await loadGeneration(req.params.id);
-    if (g.status === 'queued' || g.status === 'running') {
-      throw conflict('This generation is still in progress. Cancel it first, then delete it.');
-    }
-    const keys = [
-      ...new Set(
-        [g.characterImageKey, g.part1VideoKey, g.part2VideoKey, g.finalVideoKey, g.thumbnailKey].filter(
-          (k): k is string => Boolean(k),
+    const { id } = req.params;
+    if (!isUuid(id)) throw notFound();
+    // Files can be shared (the character image with regenerations, part 1 with part-2 regenerations).
+    // Deciding what is unshared and deleting the row happen under the admission lock, so no regeneration
+    // can start to reference a file between the check and the delete; files are removed after commit.
+    const { g, keys, unshared } = await withAdmissionLock(ctx.db, async (tx) => {
+      const found = await tx.get(id);
+      if (!found) throw notFound();
+      if (found.status === 'queued' || found.status === 'running') {
+        throw conflict('This generation is still in progress. Cancel it first, then delete it.');
+      }
+      const ownKeys = [
+        ...new Set(
+          [
+            found.characterImageKey,
+            found.part1VideoKey,
+            found.part2VideoKey,
+            found.finalVideoKey,
+            found.thumbnailKey,
+          ].filter((k): k is string => Boolean(k)),
         ),
-      ),
-    ];
-    // Files can be shared (the character image with regenerations, part 1 with part-2 regenerations):
-    // decide what to delete while this row still exists, then delete the row, then the files.
-    const unshared: string[] = [];
-    for (const key of keys) {
-      if (!(await repo.isKeyReferencedElsewhere(key, g.id))) unshared.push(key);
-    }
-    const deleted = await repo.delete(g.id);
-    if (!deleted) throw notFound();
+      ];
+      const notShared: string[] = [];
+      for (const key of ownKeys) {
+        if (!(await tx.isKeyReferencedElsewhere(key, found.id))) notShared.push(key);
+      }
+      if (!(await tx.delete(found.id))) throw notFound();
+      return { g: found, keys: ownKeys, unshared: notShared };
+    });
 
     const ownPrefix = generationKeys(g.id).prefix;
     const sharedOwnFiles = keys.some((k) => k.startsWith(ownPrefix) && !unshared.includes(k));

@@ -14,7 +14,7 @@ export interface CreateFormIssues {
  * The server caps the voice direction at the same length as the extra directions
  * (LIMITS has no separate constant for it).
  */
-export const VOICE_HINT_MAX_CHARS = LIMITS.extraDirectionsMaxChars;
+export const VOICE_HINT_MAX_CHARS = LIMITS.voiceHintMaxChars;
 
 export function validateCreateForm(input: {
   script: string;

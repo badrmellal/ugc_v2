@@ -48,7 +48,7 @@ export function registerPlanRoutes(app: FastifyInstance, deps: RouteDeps): void 
     return estimateCost(ctx.config.pricing, {
       resolution: body.settings.resolution,
       mode,
-      needsSplit: mode !== 'part2',
+      needsSplit: mode !== 'part2' && !body.hasPlan,
       reinforceCharacterOnExtend: body.settings.reinforceCharacterOnExtend ?? false,
     });
   });

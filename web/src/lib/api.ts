@@ -198,13 +198,7 @@ export function previewPlan(body: PlanRequest, signal?: AbortSignal): Promise<Sc
   return request<ScriptPlan>('/api/plan', { method: 'POST', json: body, signal });
 }
 
-/**
- * `EstimateRequest` plus the optional `reinforceCharacterOnExtend` flag that POST /api/estimate also
- * accepts, so the estimate includes the second image input when that option is on.
- */
-export type EstimateInput = EstimateRequest & {
-  settings: EstimateRequest['settings'] & { reinforceCharacterOnExtend?: boolean };
-};
+export type EstimateInput = EstimateRequest;
 
 export function estimateCost(body: EstimateInput, signal?: AbortSignal): Promise<CostBreakdown> {
   return request<CostBreakdown>('/api/estimate', { method: 'POST', json: body, signal });

@@ -26,8 +26,8 @@ export const queryKeys = {
   generations: ['generations'] as const,
   generationList: (status: GenerationStatus | 'all') => ['generations', 'list', status] as const,
   generation: (id: string) => ['generation', id] as const,
-  estimate: (resolution: Resolution, mode: RegenerationMode, reinforceCharacterOnExtend: boolean) =>
-    ['estimate', resolution, mode, reinforceCharacterOnExtend] as const,
+  estimate: (resolution: Resolution, mode: RegenerationMode, reinforceCharacterOnExtend: boolean, hasPlan: boolean) =>
+    ['estimate', resolution, mode, reinforceCharacterOnExtend, hasPlan] as const,
 };
 
 export function useSession() {
@@ -97,6 +97,8 @@ export interface EstimateOptions {
   mode?: RegenerationMode;
   /** Whether the extension turn re-sends the character image (adds image input tokens). */
   reinforceCharacterOnExtend?: boolean;
+  /** A reviewed split will be sent, so no splitter call is billed. */
+  hasPlan?: boolean;
   enabled?: boolean;
 }
 
@@ -108,15 +110,20 @@ export function useEstimate({
   resolution,
   mode = 'full',
   reinforceCharacterOnExtend = false,
+  hasPlan = false,
   enabled = true,
 }: EstimateOptions) {
   const debouncedResolution = useDebouncedValue(resolution, 300);
   const debouncedReinforce = useDebouncedValue(reinforceCharacterOnExtend, 300);
   const query = useQuery({
-    queryKey: queryKeys.estimate(debouncedResolution, mode, debouncedReinforce),
+    queryKey: queryKeys.estimate(debouncedResolution, mode, debouncedReinforce, hasPlan),
     queryFn: ({ signal }) =>
       estimateCost(
-        { settings: { resolution: debouncedResolution, reinforceCharacterOnExtend: debouncedReinforce }, mode },
+        {
+          settings: { resolution: debouncedResolution, reinforceCharacterOnExtend: debouncedReinforce },
+          mode,
+          hasPlan,
+        },
         signal,
       ),
     enabled,

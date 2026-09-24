@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pino } from 'pino';
@@ -119,7 +119,8 @@ describe('MockVideoClient', () => {
       turn({ kind: 'extension', prompt: 'Extend this video.', previousInteractionId: part1.id }),
     );
     expect(part2.status).toBe('completed');
-    expect(part2.usage?.videoOutputTokens).toBe(20 * 5792);
+    // EXTENSION_BILLING=new_seconds (default): only the new 10s are billed as output, part 1 as input.
+    expect(part2.usage?.videoOutputTokens).toBe(10 * 5792);
     expect(part2.usage?.videoInputTokens).toBe(10 * 5792);
     const p2 = join(dir, 'p2.mp4');
     await client.downloadVideo(part2.video!, p2);
@@ -150,6 +151,28 @@ describe('MockVideoClient', () => {
     const probe = probeSeconds(out);
     expect(probe.duration).toBeGreaterThan(9.5);
     expect(probe.duration).toBeLessThan(10.5);
+    await client.dispose();
+  });
+
+  it('bills the whole returned clip with EXTENSION_BILLING=full_output and cleans up stand-in clips', async () => {
+    const clock = { t: 9_000_000 };
+    const workDir = join(dir, 'full-output');
+    const cfg = loadConfig({
+      NODE_ENV: 'test',
+      GEMINI_MOCK: 'true',
+      MOCK_TURN_SECONDS: '5',
+      EXTENSION_BILLING: 'full_output',
+    });
+    const client = new MockVideoClient({ config: cfg, logger, media, workDir, now: () => clock.t });
+    const part2 = await runTurn(
+      client,
+      clock,
+      turn({ kind: 'extension', prompt: 'Extend this video.', previousInteractionId: 'mock_lost-after-restart' }),
+    );
+    expect(part2.status).toBe('completed');
+    expect(part2.usage?.videoOutputTokens).toBe(20 * 5792);
+    const files = await readdir(workDir);
+    expect(files.filter((f) => f.startsWith('standin-') || f.endsWith('-new.mp4'))).toEqual([]);
     await client.dispose();
   });
 

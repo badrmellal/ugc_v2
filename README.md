@@ -57,45 +57,47 @@ npm run dev                     # API + worker on :8080, Vite dev server on :517
 
 Scripts:
 
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | API + worker (tsx watch) and the Vite dev server with an `/api` proxy |
-| `npm run build` | Builds the web app and the server |
-| `npm start` | Runs the built server (serves the web app too) |
-| `npm test` | Unit + integration tests (needs Postgres: `TEST_DATABASE_URL`, default `postgres://postgres:postgres@localhost:5432/omni_ugc_test`) |
-| `npm run test:e2e` | Playwright end-to-end tests against the production build in mock mode |
-| `npm run lint` / `npm run typecheck` / `npm run format` | Code quality |
+| Command                                                 | What it does                                                                                                                        |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                                           | API + worker (tsx watch) and the Vite dev server with an `/api` proxy                                                               |
+| `npm run build`                                         | Builds the web app and the server                                                                                                   |
+| `npm start`                                             | Runs the built server (serves the web app too)                                                                                      |
+| `npm test`                                              | Unit + integration tests (needs Postgres: `TEST_DATABASE_URL`, default `postgres://postgres:postgres@localhost:5432/omni_ugc_test`) |
+| `npm run test:e2e`                                      | Playwright end-to-end tests against the production build in mock mode                                                               |
+| `npm run lint` / `npm run typecheck` / `npm run format` | Code quality                                                                                                                        |
 
 ## Configuration
 
 All settings are environment variables; see [.env.example](.env.example) for the full list with comments. The important ones:
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `GEMINI_API_KEY` | | Required unless `GEMINI_MOCK=true`. Billing must be enabled (Omni has no free tier). |
-| `OMNI_MODEL` | `gemini-omni-1.1-flash` | Video model. |
-| `SPLITTER_MODEL` | `gemini-3.8-flash` | Text model that splits the script. |
-| `APP_PASSWORD` / `SESSION_SECRET` | | UI login. Required in production (or `API_TOKENS`, or `AUTH_DISABLED=true` behind an auth proxy). |
-| `API_TOKENS` | | Comma-separated bearer tokens for scripts and integrations. |
-| `DATABASE_URL` | local Postgres | Migrations run automatically at startup. |
-| `STORAGE_DRIVER` | `local` | `s3` for AWS S3, Google Cloud Storage (HMAC), Cloudflare R2, MinIO. |
-| `ROLE` | `all` | `web`, `worker` or `all`. |
-| `WORKER_CONCURRENCY` | `2` | Jobs per worker process. |
-| `DAILY_BUDGET_USD` | unlimited | Blocks new jobs when today's spend plus in-flight estimates would exceed it. |
-| `PRICE_*`, `VIDEO_TOKENS_PER_SEC_*` | Google list prices | Update if pricing changes. |
+| Variable                            | Default                 | Notes                                                                                             |
+| ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`                    |                         | Required unless `GEMINI_MOCK=true`. Billing must be enabled (Omni has no free tier).              |
+| `OMNI_MODEL`                        | `gemini-omni-1.1-flash` | Video model.                                                                                      |
+| `SPLITTER_MODEL`                    | `gemini-3.8-flash`      | Text model that splits the script.                                                                |
+| `APP_PASSWORD` / `SESSION_SECRET`   |                         | UI login. Required in production (or `API_TOKENS`, or `AUTH_DISABLED=true` behind an auth proxy). |
+| `API_TOKENS`                        |                         | Comma-separated bearer tokens for scripts and integrations.                                       |
+| `DATABASE_URL`                      | local Postgres          | Migrations run automatically at startup.                                                          |
+| `STORAGE_DRIVER`                    | `local`                 | `s3` for AWS S3, Google Cloud Storage (HMAC), Cloudflare R2, MinIO.                               |
+| `ROLE`                              | `all`                   | `web`, `worker` or `all`.                                                                         |
+| `WORKER_CONCURRENCY`                | `2`                     | Jobs per worker process.                                                                          |
+| `DAILY_BUDGET_USD`                  | unlimited               | Blocks new jobs when today's spend plus in-flight estimates would exceed it.                      |
+| `PRICE_*`, `VIDEO_TOKENS_PER_SEC_*` | Google list prices      | Update if pricing changes.                                                                        |
 
 ## Costs
 
-Gemini Omni 1.1 Flash bills video output at **$17.50 per 1M tokens**, about **5,792 tokens per second at 720p (~$0.10/s)**; input is $1.50 per 1M tokens. A 20-second video is two turns:
+Gemini Omni 1.1 Flash bills video output at **$17.50 per 1M tokens**, which is **5,792 tokens per second at 720p (about $0.10/s)**. Input costs $1.50 per 1M tokens, and text and thinking output $9 per 1M. There is no free tier. A 20-second video is two turns. Estimates with the default settings:
 
-| Resolution | Part 1 (10s) | Part 2 (extension) | Typical total |
-| --- | --- | --- | --- |
-| 360p | ~$0.34 | ~$0.34 to $0.68 | ~$0.70 to $1.05 |
-| 720p | ~$1.01 | ~$1.01 to $2.03 | ~$2.10 to $3.15 |
+| Resolution | Part 1 (0-10s) | Part 2 (extension) | Total per 20s video |
+| ---------- | -------------- | ------------------ | ------------------- |
+| 360p       | $0.35          | $0.44              | $0.79               |
+| 720p       | $1.03          | $1.11              | $2.14               |
+| 1080p      | $1.53          | $1.62              | $3.15               |
+| 4k         | $3.05          | $3.14              | $6.20               |
 
-Google does not document whether the extension turn bills only the new 10 seconds or the whole returned 20-second clip, so estimates default to the conservative case (`EXTENSION_BILLING=full_output`). After every turn the app records the **actual** cost from the token usage Gemini reports, and the generation page shows both. 1080p and 4k are upscaled outputs whose token rates are not published; their defaults are conservative and actual usage is always what gets recorded.
+Part 2 costs a little more than part 1 because Omni reads the previous 10 seconds as input context. Usage-backed cost ledgers from other integrators show the extension billed for the **new 10 seconds** of video output. Google does not document this, so the setting is configurable (`EXTENSION_BILLING=full_output` switches to the conservative assumption). 1080p and 4k are upscaled outputs whose token rates Google has not published; the defaults are conservative.
 
-"Regenerate part 2 only" reuses part 1, so it costs only the extension turn.
+After every turn the app records the **actual** cost from the token usage Gemini reports, and the generation page shows estimated and actual side by side. "Regenerate part 2 only" reuses part 1, so it costs only the extension.
 
 ## Deployment
 
@@ -103,7 +105,8 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Google Cloud Run (web + always-
 
 ## Good to know
 
-- **Script length:** about 52 spoken words fit in 20 seconds (roughly 25 per part). Speech in each part ends before its last ~1.5 seconds so the seam between parts stays clean. The editor shows a pacing meter and the splitter warns when a script is too long.
+- **Script length:** about 39 spoken words fit comfortably (about 15 seconds of speech). Each part speaks for about 7.5 seconds, which leaves roughly 2 seconds of silence around the 10-second seam, where Omni regenerates the last frames of part 1 and tends to rewrite speech that crosses it. The editor shows a pacing meter and the splitter warns when a script is too long.
+- **Transport:** each 10s turn runs over a streaming connection by default (`OMNI_TRANSPORT=stream`), so the interaction id is saved within a second and a restarted worker can pick the turn up again. If the API rejects a transport (for example background polling with some newer `AQ.`-prefixed API keys), the client switches automatically and records it for all workers for 7 days. Parallel streams on one key are reported to get cut, so `OMNI_MAX_CONCURRENT_TURNS` (default 1) caps concurrent turns across the whole cluster through Postgres advisory locks; raise it once you have confirmed higher concurrency works with your key.
 - **Languages:** English is fully supported by Omni; other languages work but are not officially evaluated by Google.
 - **Content policy:** Google blocks uploaded images of certain recognizable people (and images of minors in the EEA, Switzerland and the UK). A blocked request finishes without a video; the app reports it as `empty_output` or `safety_blocked` and does not retry.
 - **Watermarking:** every Omni video carries an invisible SynthID watermark.

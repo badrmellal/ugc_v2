@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../../app-context.js';
+import { redactSecrets } from '../../pipeline/errors.js';
 
 const CHECK_TIMEOUT_MS = 3000;
 
@@ -30,14 +31,13 @@ export function registerHealthRoutes(app: FastifyInstance, ctx: AppContext): voi
     };
     const ready = checks.database === 'ok' && checks.storage === 'ok';
     if (!ready) {
-      req.log.warn(
-        {
-          database:
-            database.status === 'rejected' ? String((database.reason as Error)?.message ?? database.reason) : 'ok',
-          storage: storage.status === 'rejected' ? String((storage.reason as Error)?.message ?? storage.reason) : 'ok',
-        },
-        'readiness check failed',
-      );
+      // Driver errors can echo endpoints or credentials: log them redacted.
+      const secrets = [ctx.config.storage.s3.secretAccessKey, ctx.config.gemini.apiKey];
+      const reason = (r: PromiseSettledResult<unknown>) =>
+        r.status === 'rejected'
+          ? redactSecrets(r.reason instanceof Error ? r.reason.message : String(r.reason), secrets)
+          : 'ok';
+      req.log.warn({ database: reason(database), storage: reason(storage) }, 'readiness check failed');
     }
     reply.header('cache-control', 'no-store');
     return reply.code(ready ? 200 : 503).send({ status: ready ? 'ok' : 'unavailable', checks });

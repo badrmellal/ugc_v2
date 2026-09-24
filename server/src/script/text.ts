@@ -143,6 +143,13 @@ export function normalizedTokens(text: string): string[] {
 
 /** Length of the longest common subsequence of two token lists (order-preserving overlap). */
 export function lcsLength(a: string[], b: string[]): number {
+  // A shared prefix and suffix always belong to a longest common subsequence: trim them first so the
+  // usual near-verbatim case costs linear time instead of a full table.
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  if (head + tail > 0) return head + tail + lcsLength(a.slice(head, a.length - tail), b.slice(head, b.length - tail));
   if (!a.length || !b.length) return 0;
   let prev = new Uint32Array(b.length + 1);
   let cur = new Uint32Array(b.length + 1);
@@ -168,7 +175,8 @@ export interface VerbatimCheck {
 
 /**
  * Checks that `output` keeps the words of `source` in order. Small tolerances absorb harmless
- * differences (a number written out, a dropped speaker label) without accepting paraphrases.
+ * differences (a number written out, a dropped speaker label) without accepting paraphrases. The
+ * tolerances are capped so a long script cannot silently lose or gain a whole sentence.
  */
 export function checkVerbatim(source: string, output: string): VerbatimCheck {
   const a = normalizedTokens(source);
@@ -176,7 +184,7 @@ export function checkVerbatim(source: string, output: string): VerbatimCheck {
   const common = lcsLength(a, b);
   const missing = a.length - common;
   const extra = b.length - common;
-  const allowedMissing = Math.max(1, Math.round(a.length * 0.04));
-  const allowedExtra = Math.max(1, Math.round(b.length * 0.06));
+  const allowedMissing = Math.min(3, Math.max(1, Math.round(a.length * 0.04)));
+  const allowedExtra = Math.min(4, Math.max(1, Math.round(b.length * 0.06)));
   return { ok: missing <= allowedMissing && extra <= allowedExtra, missing, extra, scriptTokens: a.length };
 }

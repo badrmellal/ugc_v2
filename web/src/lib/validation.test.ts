@@ -41,7 +41,7 @@ describe('validateCreateForm', () => {
     // Surrounding whitespace is trimmed by the server before the length check.
     const padded = validateCreateForm({
       script,
-      settings: { ...DEFAULT_SETTINGS, voiceHint: ` ${'a'.repeat(LIMITS.extraDirectionsMaxChars)} ` },
+      settings: { ...DEFAULT_SETTINGS, voiceHint: ` ${'a'.repeat(LIMITS.voiceHintMaxChars)} ` },
       hasImage: true,
     });
     expect(padded.voiceHint).toBeUndefined();

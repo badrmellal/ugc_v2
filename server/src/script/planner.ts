@@ -11,13 +11,26 @@ import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { ScriptPlanner, ScriptSplitResult, TextModelClient, UsageInfo } from '../core/ports.js';
 import { redactSecrets } from '../pipeline/errors.js';
-import { estimateSpokenSeconds, type GenerationSettings, type ScriptPlan } from '../shared/api.js';
+import {
+  LIMITS,
+  SPEAKING_SECONDS,
+  SPEECH_WINDOWS,
+  estimateSpokenSeconds,
+  type GenerationSettings,
+  type ScriptPlan,
+} from '../shared/api.js';
 import { fallbackPlan, parseScript } from './fallback.js';
-import { finalizePlan, sanitizeSettings } from './finalize.js';
-import { SPEECH_END_SEC } from './prompts.js';
+import { finalizePlan, sanitizeSettings, wordsThatFit } from './finalize.js';
 import { checkVerbatim, cleanText, languageName } from './text.js';
 
 export const SPLIT_TIMEOUT_MS = 45_000;
+/** Comfortable speech per part (the speaking window of each 10s part). */
+const PART_SPEECH_SEC = SPEAKING_SECONDS / 2;
+/** Longest speech a part can hold before it runs past its window. */
+const PART_SPEECH_MAX_SEC = Math.max(
+  SPEECH_WINDOWS.part1.end - SPEECH_WINDOWS.part1.start,
+  SPEECH_WINDOWS.part2.end - SPEECH_WINDOWS.part2.start,
+);
 const SPLIT_TEMPERATURE = 0.4;
 
 export const SCRIPT_START_MARKER = '<<<SCRIPT';
@@ -122,12 +135,12 @@ export const SPLIT_SYSTEM_INSTRUCTION = [
   'You receive ONE script to be spoken in a single continuous 20 second vertical video with one on-camera person. The video is generated in two 10 second parts: part 1 (0-10s) first, then part 2 (10-20s) extends the same continuous shot. Split the script into two coherent 10 second beats and write a continuity bible shared by both parts.',
   'Rules:',
   '1. Dialogue is sacred. Copy every spoken word verbatim and in the original order. Never paraphrase, summarize, translate, reorder, correct or add words. Never invent new claims, facts, numbers, results or product benefits: accuracy matters, especially for scientific statements.',
-  '2. part1.dialogue followed by part2.dialogue must contain all spoken words of the script. Do not drop words. If the script is too long to speak in 20 seconds (about 52 words), still keep it verbatim and add a warning.',
-  '3. Split at the most natural point that balances speaking time (about 2.6 words per second). Prefer a sentence boundary; split inside a sentence only at a clause boundary. Each part should need at most about 7.5 seconds of speech.',
+  `2. part1.dialogue followed by part2.dialogue must contain all spoken words of the script. Do not drop words. About ${SPEAKING_SECONDS} seconds of speech (about ${wordsThatFit(SPEAKING_SECONDS)} words) fit in the video; if the script is longer, still keep it verbatim and add a warning.`,
+  `3. Split at the most natural point that balances speaking time (about ${LIMITS.wordsPerSecond} words per second). Prefer a sentence boundary; split inside a sentence only at a clause boundary. Each part should need at most about ${PART_SPEECH_SEC} seconds of speech: speech pauses briefly around the 10 second mark.`,
   '4. Stage directions are not dialogue: text in [brackets], action cues in (parentheses) such as (smiles), speaker labels such as "Hook:" or "CTA:" and timecodes. Move directions into the action of the part where they occur and drop labels and timecodes.',
   '5. The person\'s face, hair and body come from a reference image you cannot see. In "character" describe only manner, energy and wardrobe style that fit the script, in under 40 words. Do not invent facial features, hair color, skin tone, age, ethnicity or a name.',
   '6. "setting": one specific place with lighting and a few props that fit the script, identical for both parts. "voice": a specific description of timbre, accent, pace and energy, e.g. "a warm, clear voice with a standard American accent, upbeat and friendly". Honor the user\'s voice direction. "audio": room tone and ambience; no music unless the script or the user asks for it.',
-  '7. "action": a verb phrase without the subject, starting with a lowercase verb. One continuous shot: no cuts, no new locations, no other people. Part 2 continues naturally from part 1 and ends with a natural closing beat.',
+  '7. "action": a verb phrase without the subject, starting with a lowercase verb. One continuous shot: no cuts, no new locations, no other people. Part 2 continues naturally from part 1 and ends with a natural closing beat. Keep hands simple: never pick up, pass, open or put down objects (generated objects tend to duplicate or morph); if the script features a product, the person already holds it from the first frame and keeps holding it.',
   '8. "camera": framing and movement for that part, consistent with the style and with the other part.',
   '9. "onScreenText": only when the script or the user explicitly asks for on-screen text, otherwise an empty string.',
   '10. Write descriptions in English. Dialogue stays in the language of the script.',
@@ -189,7 +202,7 @@ export function planFromModelOutput(
   if (t1 + t2 >= 6 && (t1 === 0 || t2 === 0)) {
     throw new PlanRejectedError('one part has no dialogue');
   }
-  if (Math.max(t1, t2) > SPEECH_END_SEC && Math.abs(t1 - t2) > 3) {
+  if (Math.max(t1, t2) > PART_SPEECH_MAX_SEC && Math.abs(t1 - t2) > 3) {
     throw new PlanRejectedError(`unbalanced split (${t1.toFixed(1)}s / ${t2.toFixed(1)}s)`);
   }
   const segment = (index: 1 | 2, s: LlmPlanOutput['part1']) => ({

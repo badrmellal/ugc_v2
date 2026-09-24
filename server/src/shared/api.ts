@@ -74,6 +74,7 @@ export const LIMITS = {
   scriptMinChars: 10,
   scriptMaxChars: 4000,
   extraDirectionsMaxChars: 1000,
+  voiceHintMaxChars: 250,
   imageMaxBytes: 10 * 1024 * 1024,
   imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp'] as readonly string[],
   /** Comfortable spoken pace for UGC voiceover, used to warn about overlong scripts. */
@@ -164,6 +165,8 @@ export interface GenerationDTO {
   /** 0-100 overall progress. */
   progress: number;
   stageStartedAt: string | null;
+  /** For failed or canceled generations: the pipeline stage that was active when it stopped. */
+  failedStage: GenerationStage | null;
   /** Rough remaining seconds, null when unknown or finished. */
   etaSeconds: number | null;
   title: string;
@@ -237,8 +240,10 @@ export interface RegenerateRequest {
 }
 
 export interface EstimateRequest {
-  settings: Pick<GenerationSettings, 'resolution'>;
+  settings: Pick<GenerationSettings, 'resolution'> & Partial<Pick<GenerationSettings, 'reinforceCharacterOnExtend'>>;
   mode?: RegenerationMode;
+  /** True when a reviewed split will be sent with the job, so no splitter call is needed. */
+  hasPlan?: boolean;
 }
 
 export interface PricingInfo {

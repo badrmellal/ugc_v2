@@ -45,7 +45,7 @@ test('generates, previews, downloads and regenerates a 20s video', async ({ page
 
   // Optional split preview: two 10s parts with a shared continuity bible.
   await page.getByRole('button', { name: 'Preview split' }).click();
-  await expect(page.getByText('Continuity bible')).toBeVisible();
+  await expect(page.getByText('Continuity bible', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Generate 20s video' }).click();
   await page.waitForURL(/\/generations\/[0-9a-f-]{36}$/);
@@ -64,9 +64,26 @@ test('generates, previews, downloads and regenerates a 20s video', async ({ page
   expect(dto.plan.segments).toHaveLength(2);
   expect(dto.plan.segments[1].prompt).toContain('Extend this video');
 
-  // Preview player shows the final video.
-  const video = page.locator('video').first();
-  await expect(video).toHaveAttribute('src', new RegExp(`/api/generations/${id}/video`));
+  // Preview player shows the final video. Open-source Chromium builds cannot decode H.264/AAC
+  // (Chrome, Safari, Edge and Firefox can); there the player must say so instead of failing silently.
+  const canPlayH264 = await page.evaluate(
+    () => document.createElement('video').canPlayType('video/mp4; codecs="avc1.640028, mp4a.40.2"') !== '',
+  );
+  if (canPlayH264) {
+    const video = page.getByTestId('phone-player-video');
+    await expect(video).toHaveAttribute('src', new RegExp(`/api/generations/${id}/video`));
+    const duration = await video.evaluate(
+      (v: HTMLVideoElement) =>
+        new Promise<number>((resolve) => {
+          if (v.readyState >= 1) resolve(v.duration);
+          else v.addEventListener('loadedmetadata', () => resolve(v.duration), { once: true });
+        }),
+    );
+    expect(duration).toBeGreaterThan(18);
+  } else {
+    test.info().annotations.push({ type: 'note', description: 'Browser lacks H.264, playback check replaced' });
+    await expect(page.getByText('This browser cannot play H.264 video.', { exact: false })).toBeVisible();
+  }
 
   // Download returns the MP4 as an attachment; Range requests work for streaming.
   const href = await page.getByRole('link', { name: 'Download MP4' }).getAttribute('href');

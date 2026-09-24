@@ -1,6 +1,12 @@
 import type { GenerationRecord } from '../core/ports.js';
 import { estimateRemainingSeconds, progressWithinStage, type StageTimings } from '../pipeline/progress.js';
-import { isTerminalStatus, type GenerationDTO, type GenerationEvent, type GenerationListItem } from '../shared/api.js';
+import {
+  isTerminalStatus,
+  type GenerationDTO,
+  type GenerationEvent,
+  type GenerationListItem,
+  type GenerationStage,
+} from '../shared/api.js';
 
 /**
  * Interactions are retained for 55 days on the paid tier; part 2 can only be re-run on top of a
@@ -37,7 +43,13 @@ export function canRegeneratePart2(g: GenerationRecord, nowMs: number, part1Crea
   return nowMs - created < PART1_REUSE_MAX_AGE_MS;
 }
 
-const ACTIVE_STAGES = new Set(['planning', 'uploading_image', 'generating_part1', 'extending_part2', 'finalizing']);
+const ACTIVE_STAGES = new Set<GenerationStage>([
+  'planning',
+  'uploading_image',
+  'generating_part1',
+  'extending_part2',
+  'finalizing',
+]);
 
 function liveProgress(g: GenerationRecord, nowMs: number, timings: StageTimings): number {
   if (g.status === 'succeeded') return 100;
@@ -77,6 +89,7 @@ export function toGenerationDTO(
     stage: g.stage,
     progress: Math.round(liveProgress(g, nowMs, timings) * 10) / 10,
     stageStartedAt: g.stageStartedAt?.toISOString() ?? null,
+    failedStage: failedStage(g, events),
     etaSeconds: etaSeconds(g, nowMs, timings),
     title: g.title,
     script: g.script,
@@ -100,6 +113,19 @@ export function toGenerationDTO(
     startedAt: g.startedAt?.toISOString() ?? null,
     completedAt: g.completedAt?.toISOString() ?? null,
   };
+}
+
+/**
+ * Stage that was active when a job failed or was canceled: the pipeline logs the final error or cancel
+ * event before switching the stage to `failed`/`canceled`, so the newest event on an active stage wins.
+ */
+export function failedStage(g: GenerationRecord, events: GenerationEvent[]): GenerationStage | null {
+  if (g.status !== 'failed' && g.status !== 'canceled') return null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const stage = events[i]!.stage;
+    if (ACTIVE_STAGES.has(stage)) return stage;
+  }
+  return null;
 }
 
 export function toListItem(g: GenerationRecord): GenerationListItem {

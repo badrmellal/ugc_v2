@@ -19,9 +19,15 @@ function PhoneFrame({ children, label }: { children: ReactNode; label?: string }
   );
 }
 
+/** Whether this browser can decode Omni's output format (H.264 video with AAC audio in MP4). */
+function canPlayH264(): boolean {
+  if (typeof document === 'undefined') return true;
+  return document.createElement('video').canPlayType('video/mp4; codecs="avc1.640028, mp4a.40.2"') !== '';
+}
+
 /** <video> that shows a message instead of a blank frame when the file cannot be loaded. */
 function PlayerVideo({ src, poster, label }: { src: string; poster?: string; label: string }) {
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<'network' | 'unsupported' | null>(null);
   if (failed) {
     return (
       <div
@@ -29,10 +35,14 @@ function PlayerVideo({ src, poster, label }: { src: string; poster?: string; lab
         className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-white"
       >
         <VideoOff className="size-6" aria-hidden="true" />
-        <p>The video could not be loaded. Check your connection, then try again.</p>
+        <p>
+          {failed === 'unsupported'
+            ? 'This browser cannot play H.264 video. Download the MP4 to watch it, or open this page in Chrome, Safari, Edge or Firefox.'
+            : 'The video could not be loaded. Check your connection, then try again.'}
+        </p>
         <button
           type="button"
-          onClick={() => setFailed(false)}
+          onClick={() => setFailed(null)}
           className="inline-flex items-center gap-1.5 rounded-lg border border-white/40 px-3 py-1.5 font-medium hover:bg-white/10"
         >
           <RefreshCw className="size-4" aria-hidden="true" />
@@ -48,7 +58,12 @@ function PlayerVideo({ src, poster, label }: { src: string; poster?: string; lab
       controls
       playsInline
       preload="metadata"
-      onError={() => setFailed(true)}
+      onError={(event) => {
+        const code = event.currentTarget.error?.code;
+        // MEDIA_ERR_SRC_NOT_SUPPORTED (4) is also reported for HTTP failures, so check the codec itself.
+        setFailed(code === 4 && !canPlayH264() ? 'unsupported' : 'network');
+      }}
+      data-testid="phone-player-video"
       className="size-full bg-black object-contain"
       aria-label={label}
     />
