@@ -1,7 +1,7 @@
 import { RefreshCw, TriangleAlert, Undo2 } from 'lucide-react';
 import { useId } from 'react';
-import { SEGMENT_SECONDS, type ScriptPlan, type SegmentPlan } from '@shared/api';
-import { analyzePacing } from '../lib/pacing';
+import type { ScriptPlan, SegmentPlan } from '@shared/api';
+import { analyzePacing, PART_BUDGET } from '../lib/pacing';
 import {
   BIBLE_FIELDS,
   PLAN_SOURCE_LABELS,
@@ -84,8 +84,8 @@ export function PlanEditor({ plan, onChange, stale, edited, onRefresh, refreshin
 
       {plan.warnings.length > 0 && (
         <ul className="space-y-1 rounded-xl border border-line bg-surface-2/60 px-4 py-3 text-sm">
-          {plan.warnings.map((warning) => (
-            <li key={warning} className="flex gap-2">
+          {plan.warnings.map((warning, index) => (
+            <li key={`${index}-${warning}`} className="flex gap-2">
               <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden="true" />
               <span className="text-muted">{warning}</span>
             </li>
@@ -139,7 +139,7 @@ function SegmentEditor({
   onChange: (field: SegmentField, value: string) => void;
 }) {
   const id = useId();
-  const pacing = analyzePacing(segment.dialogue, SEGMENT_SECONDS);
+  const pacing = analyzePacing(segment.dialogue, PART_BUDGET);
   return (
     <fieldset className="space-y-3 rounded-xl border border-line bg-surface p-4">
       <legend className="sr-only">
@@ -187,7 +187,10 @@ function SegmentEditor({
             Shown as previewed. The server rebuilds it from the fields above when you generate.
           </p>
         )}
-        <pre className="max-h-64 overflow-auto rounded-lg bg-surface-2 p-3 text-xs leading-relaxed whitespace-pre-wrap text-muted">
+        <pre
+          tabIndex={0}
+          className="max-h-64 overflow-auto rounded-lg bg-surface-2 p-3 text-xs leading-relaxed whitespace-pre-wrap text-muted"
+        >
           {segment.prompt}
         </pre>
       </Collapsible>

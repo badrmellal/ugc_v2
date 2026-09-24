@@ -126,7 +126,8 @@ export function finalizePlan(plan: ScriptPlan, rawSettings: GenerationSettings):
     source,
     character: cleanText(p.character, { max: FIELD_LIMITS.character }) || d.character,
     setting: cleanText(p.setting, { max: FIELD_LIMITS.setting }) || d.setting,
-    voice: cleanText(p.voice, { max: FIELD_LIMITS.voice }) || settings.voiceHint || defaultVoice(settings.style, language),
+    voice:
+      cleanText(p.voice, { max: FIELD_LIMITS.voice }) || settings.voiceHint || defaultVoice(settings.style, language),
     audio: cleanText(p.audio, { max: FIELD_LIMITS.audio }) || d.audio,
     language,
     segments,

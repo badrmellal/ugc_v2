@@ -80,7 +80,7 @@ export function createLogger(config: AppConfig, overrides: Partial<LoggerOptions
       ? {
           transport: {
             target: 'pino-pretty',
-            options: { colorize: true, translateTime: 'SYS:HH:MM:ss.l', ignore: 'pid,hostname,service,role' },
+            options: { colorize: true, translateTime: 'SYS:HH:MM:ss.l', ignore: 'pid,hostname,service' },
           },
         }
       : {

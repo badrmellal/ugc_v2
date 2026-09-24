@@ -46,8 +46,8 @@ export function CostBreakdownView({
       </table>
       {breakdown.notes.length > 0 && (
         <ul className="mt-3 space-y-1 text-xs text-muted">
-          {breakdown.notes.map((note) => (
-            <li key={note}>{note}</li>
+          {breakdown.notes.map((note, index) => (
+            <li key={`${index}-${note}`}>{note}</li>
           ))}
         </ul>
       )}

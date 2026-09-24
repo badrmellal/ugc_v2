@@ -31,7 +31,8 @@ type IdParams = { Params: { id: string } };
 export function deriveTitle(script: string): string {
   const oneLine = script.replace(/\s+/g, ' ').trim();
   const firstLine = script.trim().split(/\r?\n/, 1)[0]?.trim() ?? oneLine;
-  const sentence = (/^.*?[.!?。！？](?=\s|$)/u.exec(firstLine)?.[0] ?? firstLine).replace(/\s+/g, ' ').trim();
+  // Latin sentence ends need a following space ("3.5" is not an end); CJK full stops do not.
+  const sentence = (/^.*?(?:[.!?](?=\s|$)|[。！？])/u.exec(firstLine)?.[0] ?? firstLine).replace(/\s+/g, ' ').trim();
   const title = sentence || oneLine || 'Untitled video';
   if (title.length <= TITLE_MAX) return title;
   const cut = title.slice(0, TITLE_MAX - 3);
@@ -117,6 +118,8 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
         'Send the generation as multipart/form-data with a "payload" JSON field and a "characterImage" file.',
       );
     }
+    // Cheap check first, before receiving up to 10 MB of image.
+    await assertQueueCapacity();
     const dir = await mkdtemp(join(tmpdir(), 'omni-upload-'));
     try {
       const upload = await readGenerationUpload(req, dir);
@@ -125,7 +128,6 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
       if (!upload.image) throw validationError('Attach the character image as the "characterImage" file.');
       await sniffImage(upload.image.path, upload.image.size);
 
-      await assertQueueCapacity();
       const estimatedCost = estimateCost(config.pricing, {
         resolution: payload.settings.resolution,
         mode: 'full',

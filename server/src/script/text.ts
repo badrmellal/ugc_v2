@@ -3,9 +3,10 @@
 const EM_DASH = String.fromCharCode(0x2014);
 const EM_DASH_RUN = new RegExp(`\\s*${EM_DASH}+\\s*`, 'g');
 /** Omni media binding tags and declarations. Stripped from user text so it cannot rebind images. */
-const OMNI_TAGS = /<\/?\s*(?:FIRST_FRAME|LAST_FRAME|PREVIOUS_VIDEO|IMAGE_REF_\d+|VIDEO_REF_\d+|VIDEO_\d+)\s*>|\[#\s*(?:Sources|References)[^\]]*\]/gi;
+const OMNI_TAGS =
+  /<\/?\s*(?:FIRST_FRAME|LAST_FRAME|PREVIOUS_VIDEO|IMAGE_REF_\d+|VIDEO_REF_\d+|VIDEO_\d+)\s*>|\[#\s*(?:Sources|References)[^\]]*\]/gi;
 
-export const CJK_CHAR = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿ｦ-ﾟ]/;
+export const CJK_CHAR = /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF66-\uFF9F]/;
 
 /** Removes C0/C1 control characters (except tab and newline), zero-width spaces and line separators. */
 export function stripControlChars(s: string): string {
@@ -21,7 +22,9 @@ export function stripControlChars(s: string): string {
 
 /** Replaces em dashes (never sent anywhere) with a comma pause. */
 export function replaceEmDashes(text: string): string {
-  return text.replace(EM_DASH_RUN, ', ').replace(/^,\s*/, '').replace(/,\s*$/, '');
+  return text.replace(EM_DASH_RUN, (match: string, offset: number, whole: string) =>
+    offset === 0 || offset + match.length === whole.length ? ' ' : ', ',
+  );
 }
 
 export interface CleanOptions {
@@ -60,14 +63,17 @@ export function truncate(s: string, max: number): string {
 
 /** Makes a string safe to embed in a double-quoted span of the prompt. */
 export function quoteSafe(s: string): string {
-  return s.replace(/["“”„«»]/g, "'").replace(/\s+/g, ' ').trim();
+  return s
+    .replace(/["\u201C\u201D\u201E\u00AB\u00BB]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Ensures a clause ends with sentence punctuation. */
 export function sentence(s: string): string {
   const t = s.trim();
   if (!t) return '';
-  return /[.!?。！？]["')\]]*$/.test(t) ? t : `${t}.`;
+  return /[.!?\u3002\uFF01\uFF1F]["')\]]*$/.test(t) ? t : `${t}.`;
 }
 
 /** Lowercases the first letter (for embedding a clause after "The person"). */
@@ -112,7 +118,7 @@ export function normalizedTokens(text: string): string[] {
   const s = text
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/[‘’ʼ`']/g, '');
+    .replace(/[\u2018\u2019\u02BC`']/g, '');
   const out: string[] = [];
   for (const chunk of s.split(/[^\p{L}\p{N}\p{M}]+/u)) {
     if (!chunk) continue;

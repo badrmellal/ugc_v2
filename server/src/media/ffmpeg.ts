@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { access, mkdir, mkdtemp, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { AppConfig } from '../config.js';
 import type { MediaTools, ProbeResult } from '../core/ports.js';
 
 export type MediaErrorCode =
@@ -40,7 +41,7 @@ export interface FfmpegMediaToolsOptions {
   ffmpegPath?: string;
   /** ffprobe binary. Default `ffprobe`. */
   ffprobePath?: string;
-  /** Kill a single ffmpeg/ffprobe process after this long. Default 180000 ms. */
+  /** Kill a single ffmpeg/ffprobe process after this long. Default 600000 ms (`MEDIA_TIMEOUT_SEC` default). */
   timeoutMs?: number;
   /**
    * Font for mock clip captions. `undefined`: first common system font found, else fontconfig default.
@@ -55,7 +56,14 @@ export interface FfmpegMediaToolsOptions {
 
 export type ImageFormat = 'jpeg' | 'png' | 'webp';
 
-const DEFAULT_TIMEOUT_MS = 180_000;
+/** Same default as `MEDIA_TIMEOUT_SEC`: a 4K concat on a small CPU can take several minutes. */
+const DEFAULT_TIMEOUT_MS = 600_000;
+/**
+ * Cap for image normalization, which runs inside the upload request: decoding even a 100 MP image
+ * takes a few seconds, so a longer run means a hostile or broken file and must not hold the request.
+ */
+const IMAGE_TIMEOUT_MS = 60_000;
+const TOO_LARGE_RE = /Picture size (\d+x\d+) exceeds specified max pixel count/;
 const DEFAULT_MAX_IMAGE_PIXELS = 100_000_000;
 const STDERR_TAIL_CHARS = 2000;
 const STDOUT_MAX_BYTES = 16 * 1024 * 1024;
@@ -120,6 +128,21 @@ interface DetailedProbe extends ProbeResult {
 interface RunResult {
   stdout: Buffer;
   stderr: string;
+}
+
+interface RunOptions {
+  cwd?: string;
+  /** Overrides the instance timeout for this run. */
+  timeoutMs?: number;
+}
+
+/** Builds the media tools from the `FFMPEG_PATH`, `FFPROBE_PATH` and `MEDIA_TIMEOUT_SEC` settings. */
+export function createMediaTools(config: Pick<AppConfig, 'media'>): FfmpegMediaTools {
+  return new FfmpegMediaTools({
+    ffmpegPath: config.media.ffmpegPath,
+    ffprobePath: config.media.ffprobePath,
+    timeoutMs: config.media.timeoutMs,
+  });
 }
 
 /** MediaTools implementation on top of the ffmpeg and ffprobe command line tools (never through a shell). */
@@ -282,29 +305,42 @@ export class FfmpegMediaTools implements MediaTools {
     // A fixed image demuxer: never let ffmpeg probe untrusted uploads as playlists or other containers.
     const demuxer = `${format}_pipe`;
 
-    const { data: json, stderr } = await this.ffprobeRaw([
-      '-protocol_whitelist',
-      'file',
-      '-f',
-      demuxer,
-      '-max_pixels',
-      String(this.maxImagePixels),
-      '-select_streams',
-      'v:0',
-      '-show_streams',
-      '-show_frames',
-      '-read_intervals',
-      '%+#1',
-      src,
-    ]);
+    const timeoutMs = Math.min(this.timeoutMs, IMAGE_TIMEOUT_MS);
+    const tooLargeError = (size: string, stderr: string) =>
+      new MediaError('image_too_large', `Image is ${size}, above the ${this.maxImagePixels} pixel limit`, { stderr });
+
+    let probed: { data: FfprobeOutput; stderr: string };
+    try {
+      probed = await this.ffprobeRaw(
+        [
+          '-protocol_whitelist',
+          'file',
+          '-f',
+          demuxer,
+          '-max_pixels',
+          String(this.maxImagePixels),
+          '-select_streams',
+          'v:0',
+          '-show_streams',
+          '-show_frames',
+          '-read_intervals',
+          '%+#1',
+          src,
+        ],
+        { timeoutMs },
+      );
+    } catch (err) {
+      // Some ffprobe builds exit non-zero when the decoder refuses the size: still report it as too large.
+      const match = err instanceof MediaError ? TOO_LARGE_RE.exec(err.stderr) : null;
+      if (match) throw tooLargeError(match[1] as string, (err as MediaError).stderr);
+      throw err;
+    }
+    const { data: json, stderr } = probed;
     const stream = json.streams?.[0];
     const frame = json.frames?.[0];
-    const tooLarge = /Picture size (\d+x\d+) exceeds specified max pixel count/.exec(stderr);
+    const tooLarge = TOO_LARGE_RE.exec(stderr);
     if (tooLarge || (stream?.width && stream.height && stream.width * stream.height > this.maxImagePixels)) {
-      const size = tooLarge?.[1] ?? `${stream?.width}x${stream?.height}`;
-      throw new MediaError('image_too_large', `Image is ${size}, above the ${this.maxImagePixels} pixel limit`, {
-        stderr,
-      });
+      throw tooLargeError(tooLarge?.[1] ?? `${stream?.width}x${stream?.height}`, stderr);
     }
     if (!stream?.width || !stream.height || !frame) {
       throw new MediaError('invalid_media', 'Image could not be decoded', { stderr });
@@ -333,42 +369,45 @@ export class FfmpegMediaTools implements MediaTools {
     }
 
     await this.writeOutput(output, (tmp) =>
-      this.ffmpeg([
-        // Orientation is applied explicitly above, identically on every ffmpeg version.
-        '-noautorotate',
-        '-protocol_whitelist',
-        'file',
-        '-f',
-        demuxer,
-        '-max_pixels',
-        String(this.maxImagePixels),
-        '-i',
-        src,
-        '-filter_complex',
-        graph,
-        '-map',
-        '[out]',
-        '-frames:v',
-        '1',
-        '-map_metadata',
-        '-1',
-        '-map_chapters',
-        '-1',
-        '-c:v',
-        'mjpeg',
-        '-q:v',
-        '2',
-        // No encoder comment or other identifying data in the output.
-        '-fflags',
-        '+bitexact',
-        '-flags:v',
-        '+bitexact',
-        '-f',
-        'image2',
-        '-update',
-        '1',
-        tmp,
-      ]),
+      this.ffmpeg(
+        [
+          // Orientation is applied explicitly above, identically on every ffmpeg version.
+          '-noautorotate',
+          '-protocol_whitelist',
+          'file',
+          '-f',
+          demuxer,
+          '-max_pixels',
+          String(this.maxImagePixels),
+          '-i',
+          src,
+          '-filter_complex',
+          graph,
+          '-map',
+          '[out]',
+          '-frames:v',
+          '1',
+          '-map_metadata',
+          '-1',
+          '-map_chapters',
+          '-1',
+          '-c:v',
+          'mjpeg',
+          '-q:v',
+          '2',
+          // No encoder comment or other identifying data in the output.
+          '-fflags',
+          '+bitexact',
+          '-flags:v',
+          '+bitexact',
+          '-f',
+          'image2',
+          '-update',
+          '1',
+          tmp,
+        ],
+        { timeoutMs },
+      ),
     );
 
     const out = await this.probeDetailed(path.resolve(output));
@@ -405,7 +444,7 @@ export class FfmpegMediaTools implements MediaTools {
       const font = await this.resolveFont();
 
       const videoInput = image
-        ? ['-i', image]
+        ? [...INPUT_GUARD, '-i', image]
         : ['-f', 'lavfi', '-i', `testsrc2=size=${width}x${height}:rate=${SYNTH_FPS}:duration=${d}`];
       // Scale the image once to 115% of the frame, repeat that frame for the whole clip and pan
       // diagonally across it, so the clip visibly moves (decoding the image per frame is ~6x slower).
@@ -524,10 +563,13 @@ export class FfmpegMediaTools implements MediaTools {
     };
   }
 
-  private async ffprobeRaw(args: string[]): Promise<{ data: FfprobeOutput; stderr: string }> {
+  private async ffprobeRaw(
+    args: string[],
+    opts: { timeoutMs?: number } = {},
+  ): Promise<{ data: FfprobeOutput; stderr: string }> {
     let result: RunResult;
     try {
-      result = await this.run(this.ffprobePath, ['-v', 'error', '-print_format', 'json', ...args]);
+      result = await this.run(this.ffprobePath, ['-v', 'error', '-print_format', 'json', ...args], opts);
     } catch (err) {
       if (err instanceof MediaError && err.code === 'process_failed') {
         throw new MediaError('invalid_media', `Not a readable media file: ${lastLine(err.stderr)}`, {
@@ -545,7 +587,7 @@ export class FfmpegMediaTools implements MediaTools {
     }
   }
 
-  private ffmpeg(args: string[], opts: { cwd?: string } = {}): Promise<RunResult> {
+  private ffmpeg(args: string[], opts: RunOptions = {}): Promise<RunResult> {
     return this.run(
       this.ffmpegPath,
       ['-hide_banner', '-nostdin', '-nostats', '-loglevel', 'error', '-y', ...args],
@@ -554,8 +596,9 @@ export class FfmpegMediaTools implements MediaTools {
   }
 
   /** Spawns a tool with an argument array (no shell), enforcing the timeout and capturing output. */
-  private run(bin: string, args: string[], opts: { cwd?: string } = {}): Promise<RunResult> {
+  private run(bin: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
     const tool = path.basename(bin);
+    const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
     return new Promise<RunResult>((resolve, reject) => {
       const child = spawn(bin, args, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       const stdout: Buffer[] = [];
@@ -575,7 +618,7 @@ export class FfmpegMediaTools implements MediaTools {
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill('SIGKILL');
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       child.stdout.on('data', (chunk: Buffer) => {
         if (stdoutBytes < STDOUT_MAX_BYTES) {
@@ -597,7 +640,7 @@ export class FfmpegMediaTools implements MediaTools {
         const errTail = tail(stderr);
         if (timedOut) {
           finish(
-            new MediaError('timeout', `${tool} timed out after ${Math.round(this.timeoutMs / 1000)}s`, {
+            new MediaError('timeout', `${tool} timed out after ${Math.round(timeoutMs / 1000)}s`, {
               stderr: errTail,
               exitCode,
             }),

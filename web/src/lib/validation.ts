@@ -6,8 +6,15 @@ export interface CreateFormIssues {
   script?: string;
   image?: string;
   language?: string;
+  voiceHint?: string;
   extraDirections?: string;
 }
+
+/**
+ * The server caps the voice direction at the same length as the extra directions
+ * (LIMITS has no separate constant for it).
+ */
+export const VOICE_HINT_MAX_CHARS = LIMITS.extraDirectionsMaxChars;
 
 export function validateCreateForm(input: {
   script: string;
@@ -27,7 +34,10 @@ export function validateCreateForm(input: {
   } else if (!isValidLanguageTag(input.settings.language)) {
     issues.language = 'Use a language code such as en, fr or pt-BR.';
   }
-  if (input.settings.extraDirections.length > LIMITS.extraDirectionsMaxChars) {
+  if (input.settings.voiceHint.trim().length > VOICE_HINT_MAX_CHARS) {
+    issues.voiceHint = `The voice direction is limited to ${VOICE_HINT_MAX_CHARS} characters.`;
+  }
+  if (input.settings.extraDirections.trim().length > LIMITS.extraDirectionsMaxChars) {
     issues.extraDirections = `Extra directions are limited to ${LIMITS.extraDirectionsMaxChars} characters.`;
   }
   return issues;

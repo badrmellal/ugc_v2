@@ -4,6 +4,7 @@ import { useId, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { isTerminalStatus, type GenerationDTO, type RegenerateRequest } from '@shared/api';
 import { cancelGeneration, deleteGeneration, regenerateGeneration } from '../lib/api';
+import { preventImplicitSubmit } from '../lib/forms';
 import { invalidateAfterGenerationChange, queryKeys } from '../lib/hooks';
 import { diffSegmentEdits, SEGMENT_FIELDS, type SegmentEdits } from '../lib/plan';
 import { cn } from '../lib/cn';
@@ -24,6 +25,13 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
   const toast = useToast();
   const [dialog, setDialog] = useState<OpenDialog>(null);
   const terminal = isTerminalStatus(g.status);
+  const part2Unavailable = !terminal
+    ? 'Available when this generation has finished'
+    : !g.canRegeneratePart2
+      ? g.part1VideoUrl
+        ? 'Part 1 of this video can no longer be extended. Use Regenerate instead.'
+        : 'Needs a finished part 1 (0-10s)'
+      : undefined;
 
   const openNewGeneration = (dto: GenerationDTO, title: string) => {
     queryClient.setQueryData(queryKeys.generation(dto.id), dto);
@@ -85,10 +93,16 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
           Download MP4
         </a>
       ) : (
-        <span aria-disabled="true" className={buttonClass('primary', 'lg', 'w-full')}>
-          <Download className="size-5" aria-hidden="true" />
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          disabled
+          title="Available when the video is ready"
+          icon={<Download className="size-5" aria-hidden="true" />}
+        >
           Download MP4
-        </span>
+        </Button>
       )}
 
       <div className="grid gap-2">
@@ -102,8 +116,8 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
         </Button>
         <Button
           onClick={() => setDialog('part2')}
-          disabled={!terminal || !g.canRegeneratePart2}
-          title={g.canRegeneratePart2 ? undefined : 'Needs a finished part 1'}
+          disabled={part2Unavailable !== undefined}
+          title={part2Unavailable}
           icon={<Scissors className="size-4" aria-hidden="true" />}
         >
           Regenerate part 2 only
@@ -145,7 +159,11 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
         confirmIcon={<RefreshCw className="size-4" aria-hidden="true" />}
         size="md"
       >
-        <CostEstimate resolution={g.settings.resolution} mode="full" />
+        <CostEstimate
+          resolution={g.settings.resolution}
+          mode="full"
+          reinforceCharacterOnExtend={g.settings.reinforceCharacterOnExtend}
+        />
       </ConfirmDialog>
 
       <Dialog
@@ -220,11 +238,12 @@ function Part2Form({
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (pending) return;
     onSubmit(changedCount > 0 ? changes : undefined);
   };
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form onSubmit={submit} onKeyDown={preventImplicitSubmit} className="space-y-4">
       {SEGMENT_FIELDS.map(({ field, label, multiline }) => (
         <div key={field} className="space-y-1">
           <label htmlFor={`${id}-${field}`} className="text-sm font-medium">
@@ -255,7 +274,11 @@ function Part2Form({
       </p>
       <div className="rounded-xl border border-line p-3">
         <p className="mb-2 text-sm font-medium">Estimated cost (part 2 only)</p>
-        <CostEstimate resolution={g.settings.resolution} mode="part2" />
+        <CostEstimate
+          resolution={g.settings.resolution}
+          mode="part2"
+          reinforceCharacterOnExtend={g.settings.reinforceCharacterOnExtend}
+        />
       </div>
       {error ? <ErrorAlert error={error} /> : null}
       <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-4">

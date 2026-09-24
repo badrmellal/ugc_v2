@@ -381,7 +381,8 @@ export function mockSplitAnswer(prompt: string): Record<string, unknown> {
   const plan = fallbackPlan(script, settings);
   const seg = (i: 0 | 1) => ({
     dialogue: plan.segments[i].dialogue,
-    action: plan.segments[i].action || (i === 0 ? 'talks to the camera with natural gestures' : 'keeps talking and smiles'),
+    action:
+      plan.segments[i].action || (i === 0 ? 'talks to the camera with natural gestures' : 'keeps talking and smiles'),
     camera: plan.segments[i].camera,
     onScreenText: plan.segments[i].onScreenText,
   });

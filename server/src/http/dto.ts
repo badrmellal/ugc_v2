@@ -1,11 +1,6 @@
 import type { GenerationRecord } from '../core/ports.js';
 import { estimateRemainingSeconds, progressWithinStage, type StageTimings } from '../pipeline/progress.js';
-import {
-  isTerminalStatus,
-  type GenerationDTO,
-  type GenerationEvent,
-  type GenerationListItem,
-} from '../shared/api.js';
+import { isTerminalStatus, type GenerationDTO, type GenerationEvent, type GenerationListItem } from '../shared/api.js';
 
 /**
  * Interactions are retained for 55 days on the paid tier; part 2 can only be re-run on top of a

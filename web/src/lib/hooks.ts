@@ -14,7 +14,7 @@ import {
   type RegenerationMode,
   type Resolution,
 } from '@shared/api';
-import { estimateCost, getConfig, getGeneration, getSession, listGenerations } from './api';
+import { estimateCost, getConfig, getGeneration, getSession, isApiError, listGenerations } from './api';
 
 export const GENERATION_POLL_MS = 2000;
 export const HISTORY_POLL_MS = 4000;
@@ -26,7 +26,8 @@ export const queryKeys = {
   generations: ['generations'] as const,
   generationList: (status: GenerationStatus | 'all') => ['generations', 'list', status] as const,
   generation: (id: string) => ['generation', id] as const,
-  estimate: (resolution: Resolution, mode: RegenerationMode) => ['estimate', resolution, mode] as const,
+  estimate: (resolution: Resolution, mode: RegenerationMode, reinforceCharacterOnExtend: boolean) =>
+    ['estimate', resolution, mode, reinforceCharacterOnExtend] as const,
 };
 
 export function useSession() {
@@ -55,7 +56,9 @@ export function useGeneration(id: string | null | undefined, options: { poll?: b
     queryFn: ({ signal }) => getGeneration(id ?? '', signal),
     enabled: Boolean(id),
     refetchInterval: (query) => {
-      const data = query.state.data;
+      const { data, error } = query.state;
+      // Deleted (404) or signed out (401): polling again cannot succeed.
+      if (isApiError(error) && (error.status === 404 || error.status === 401)) return false;
       return poll && data && !isTerminalStatus(data.status) ? GENERATION_POLL_MS : false;
     },
   });
@@ -89,16 +92,40 @@ export function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-/** Cost estimate for a resolution, debounced by 300ms. */
-export function useEstimate(resolution: Resolution, mode: RegenerationMode = 'full', enabled = true) {
-  const debounced = useDebouncedValue(resolution, 300);
-  return useQuery({
-    queryKey: queryKeys.estimate(debounced, mode),
-    queryFn: ({ signal }) => estimateCost({ settings: { resolution: debounced }, mode }, signal),
+export interface EstimateOptions {
+  resolution: Resolution;
+  mode?: RegenerationMode;
+  /** Whether the extension turn re-sends the character image (adds image input tokens). */
+  reinforceCharacterOnExtend?: boolean;
+  enabled?: boolean;
+}
+
+/**
+ * Cost estimate from POST /api/estimate, debounced by 300ms. `outdated` is true while the inputs
+ * changed but the matching estimate has not arrived yet (the previous one is still shown).
+ */
+export function useEstimate({
+  resolution,
+  mode = 'full',
+  reinforceCharacterOnExtend = false,
+  enabled = true,
+}: EstimateOptions) {
+  const debouncedResolution = useDebouncedValue(resolution, 300);
+  const debouncedReinforce = useDebouncedValue(reinforceCharacterOnExtend, 300);
+  const query = useQuery({
+    queryKey: queryKeys.estimate(debouncedResolution, mode, debouncedReinforce),
+    queryFn: ({ signal }) =>
+      estimateCost(
+        { settings: { resolution: debouncedResolution, reinforceCharacterOnExtend: debouncedReinforce }, mode },
+        signal,
+      ),
     enabled,
     staleTime: 5 * 60_000,
     placeholderData: keepPreviousData,
   });
+  const outdated =
+    query.isPlaceholderData || debouncedResolution !== resolution || debouncedReinforce !== reinforceCharacterOnExtend;
+  return { query, outdated };
 }
 
 /** Current time, refreshed every `intervalMs` while enabled (for elapsed timers). */

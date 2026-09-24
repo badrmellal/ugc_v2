@@ -16,8 +16,8 @@ export function PlanSummary({ plan }: { plan: ScriptPlan }) {
       </div>
       {plan.warnings.length > 0 && (
         <ul className="space-y-1">
-          {plan.warnings.map((warning) => (
-            <li key={warning} className="flex gap-2 text-muted">
+          {plan.warnings.map((warning, index) => (
+            <li key={`${index}-${warning}`} className="flex gap-2 text-muted">
               <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden="true" />
               {warning}
             </li>
@@ -64,7 +64,10 @@ export function PlanSummary({ plan }: { plan: ScriptPlan }) {
               )}
             </dl>
             <Collapsible summary="Prompt sent to Omni" summaryClassName="text-xs">
-              <pre className="max-h-72 overflow-auto rounded-lg bg-surface-2 p-3 text-xs leading-relaxed whitespace-pre-wrap text-muted">
+              <pre
+                tabIndex={0}
+                className="max-h-72 overflow-auto rounded-lg bg-surface-2 p-3 text-xs leading-relaxed whitespace-pre-wrap text-muted"
+              >
                 {segment.prompt}
               </pre>
             </Collapsible>

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { createReadStream as fsCreateReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rename, rm, stat as fsStat } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { mkdir, open, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -80,15 +80,25 @@ export class S3Storage implements StorageDriver {
 
   async putFile(key: string, localPath: string, contentType: string): Promise<StoredObjectInfo> {
     const Key = this.objectKey(key);
-    const { size } = await fsStat(localPath);
     for (let attempt = 1; ; attempt++) {
-      const body = fsCreateReadStream(localPath);
+      // A fresh stream per attempt (a consumed stream cannot be replayed); the stream owns its handle.
+      const { body, size } = await openUploadBody(localPath);
+      // The SDK pipes the body into the request without an error listener: a read error would be
+      // an uncaught 'error' event (process crash) and leave the request hanging. Abort instead.
+      const controller = new AbortController();
+      let readError: unknown = null;
+      body.on('error', (err) => {
+        readError ??= err;
+        controller.abort(err);
+      });
       try {
         await this.client.send(
           new PutObjectCommand({ Bucket: this.bucket, Key, Body: body, ContentLength: size, ContentType: contentType }),
+          { abortSignal: controller.signal },
         );
         return { key, size, contentType };
       } catch (err) {
+        if (readError) throw readError;
         if (attempt >= PUT_FILE_ATTEMPTS || !isRetryable(err)) throw err;
         await sleep(300 * 2 ** (attempt - 1) + Math.floor(Math.random() * 200));
       } finally {
@@ -114,9 +124,10 @@ export class S3Storage implements StorageDriver {
   async downloadToFile(key: string, localPath: string): Promise<void> {
     const body = await this.getBody(key);
     const dest = path.resolve(localPath);
-    await mkdir(path.dirname(dest), { recursive: true });
     const tmp = `${dest}.${randomBytes(6).toString('hex')}.part`;
     try {
+      // Inside the try: the response body must be released (destroyed) on every failure path.
+      await mkdir(path.dirname(dest), { recursive: true });
       await pipeline(body, createWriteStream(tmp));
       await rename(tmp, dest);
     } catch (err) {
@@ -251,6 +262,11 @@ export class S3Storage implements StorageDriver {
       throw new Error(`Unexpected GetObject body type for ${key}`);
     } catch (err) {
       if (isNotFound(err)) throw new StorageError('not_found', `Object not found: ${key}`, { cause: err });
+      if (range && isInvalidRange(err)) {
+        throw new StorageError('invalid_range', `Byte range ${range.start}-${range.end} is outside ${key}`, {
+          cause: err,
+        });
+      }
       throw err;
     }
   }
@@ -261,6 +277,21 @@ export class S3Storage implements StorageDriver {
     } catch (err) {
       if (!isNotFound(err)) throw err;
     }
+  }
+}
+
+/**
+ * Opens a local file for upload. A missing file rejects here (instead of as a stream 'error' event),
+ * and ContentLength is the size of the file actually opened.
+ */
+async function openUploadBody(localPath: string): Promise<{ body: Readable; size: number }> {
+  const fh = await open(localPath, 'r');
+  try {
+    const { size } = await fh.stat();
+    return { body: fh.createReadStream(), size };
+  } catch (err) {
+    await fh.close().catch(() => undefined);
+    throw err;
   }
 }
 
@@ -290,10 +321,17 @@ function asSdkError(err: unknown): SdkErrorShape {
   return typeof err === 'object' && err !== null ? (err as SdkErrorShape) : {};
 }
 
+/** A missing object. A missing bucket is a configuration error and must not look like a 404. */
 function isNotFound(err: unknown): boolean {
   const e = asSdkError(err);
   const name = e.name ?? e.Code ?? e.code;
+  if (name === 'NoSuchBucket') return false;
   return name === 'NotFound' || name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404;
+}
+
+function isInvalidRange(err: unknown): boolean {
+  const e = asSdkError(err);
+  return (e.name ?? e.Code ?? e.code) === 'InvalidRange' || e.$metadata?.httpStatusCode === 416;
 }
 
 function isForbidden(err: unknown): boolean {
@@ -316,7 +354,8 @@ const RETRYABLE_ERRNO = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDO
 function isRetryable(err: unknown): boolean {
   const e = asSdkError(err);
   const status = e.$metadata?.httpStatusCode;
-  if (status !== undefined && (status === 429 || status >= 500)) return true;
+  // 501 Not Implemented is permanent (e.g. an S3 feature the provider does not support).
+  if (status !== undefined && (status === 429 || (status >= 500 && status !== 501))) return true;
   if (e.$retryable) return true;
   if (e.name && RETRYABLE_NAMES.has(e.name)) return true;
   return typeof e.code === 'string' && RETRYABLE_ERRNO.has(e.code);

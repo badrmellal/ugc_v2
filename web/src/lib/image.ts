@@ -8,9 +8,12 @@ const EXTENSION_TYPES: Record<string, string> = {
   webp: 'image/webp',
 };
 
-/** MIME type of the file, falling back to its extension when the browser reports none. */
+/**
+ * MIME type of the file, falling back to its extension when the browser reports none or a generic
+ * type. The server sniffs the real format from the file's bytes.
+ */
 export function resolveImageType(file: { name: string; type: string }): string {
-  if (file.type) return file.type;
+  if (file.type && file.type !== 'application/octet-stream') return file.type;
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
   return EXTENSION_TYPES[extension] ?? '';
 }

@@ -1,5 +1,6 @@
 /** UI copy and option lists for generation settings. */
 import {
+  SEGMENT_SECONDS,
   TOTAL_SECONDS,
   type GenerationSettings,
   type ImageMode,
@@ -40,9 +41,17 @@ export const IMAGE_MODE_LABELS: Record<ImageMode, string> = {
   first_frame: 'First frame',
 };
 
-/** Video output price for a full 20s video at this resolution. */
+/**
+ * Seconds of video output billed for one 20s video: 10s for part 1, plus 10s for the extension, or the
+ * whole returned 20s clip when the extension is billed for its full output.
+ */
+export function billedVideoSeconds(pricing: Pick<PricingInfo, 'extensionBilling'>): number {
+  return SEGMENT_SECONDS + (pricing.extensionBilling === 'full_output' ? TOTAL_SECONDS : SEGMENT_SECONDS);
+}
+
+/** Video output price for one 20s video at this resolution (input and text tokens not included). */
 export function pricePerVideo(pricing: PricingInfo, resolution: Resolution): number {
-  return (pricing.videoOutputUsdPerSecond[resolution] ?? 0) * TOTAL_SECONDS;
+  return (pricing.videoOutputUsdPerSecond[resolution] ?? 0) * billedVideoSeconds(pricing);
 }
 
 export const LANGUAGES: ReadonlyArray<{ code: string; label: string }> = [
@@ -94,9 +103,9 @@ export function languageLabel(code: string): string {
   return LANGUAGES.find((language) => language.code === code)?.label ?? code;
 }
 
-/** Loose BCP-47 shape check (`en`, `pt-BR`, `zh-Hant-TW`). The server has the final say. */
+/** BCP-47 shape check (`en`, `pt-BR`, `zh-Hant-TW`), the same pattern the server validates with. */
 export function isValidLanguageTag(tag: string): boolean {
-  return /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(tag.trim());
+  return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/.test(tag.trim());
 }
 
 export function settingsSummary(settings: GenerationSettings): string {

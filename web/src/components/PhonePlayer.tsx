@@ -1,5 +1,5 @@
-import { Ban, CircleX, Sparkles } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { Ban, CircleX, RefreshCw, Sparkles, VideoOff } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import { STAGE_LABELS, isTerminalStatus, type GenerationDTO } from '@shared/api';
 import { cn } from '../lib/cn';
 
@@ -19,6 +19,42 @@ function PhoneFrame({ children, label }: { children: ReactNode; label?: string }
   );
 }
 
+/** <video> that shows a message instead of a blank frame when the file cannot be loaded. */
+function PlayerVideo({ src, poster, label }: { src: string; poster?: string; label: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div
+        role="alert"
+        className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-white"
+      >
+        <VideoOff className="size-6" aria-hidden="true" />
+        <p>The video could not be loaded. Check your connection, then try again.</p>
+        <button
+          type="button"
+          onClick={() => setFailed(false)}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-white/40 px-3 py-1.5 font-medium hover:bg-white/10"
+        >
+          <RefreshCw className="size-4" aria-hidden="true" />
+          Try again
+        </button>
+      </div>
+    );
+  }
+  return (
+    <video
+      src={src}
+      poster={poster}
+      controls
+      playsInline
+      preload="metadata"
+      onError={() => setFailed(true)}
+      className="size-full bg-black object-contain"
+      aria-label={label}
+    />
+  );
+}
+
 /**
  * 9:16 player. Shows the final video when ready, part 1 while the extension is running,
  * and the character image with a progress overlay before that.
@@ -27,15 +63,11 @@ export function PhonePlayer({ generation: g }: { generation: PlayerSource }) {
   if (g.videoUrl) {
     return (
       <PhoneFrame>
-        <video
+        <PlayerVideo
           key={g.videoUrl}
           src={g.videoUrl}
           poster={g.thumbnailUrl ?? undefined}
-          controls
-          playsInline
-          preload="metadata"
-          className="size-full bg-black object-contain"
-          aria-label={`${g.title}, final 20-second video`}
+          label={`${g.title}, final 20-second video`}
         />
       </PhoneFrame>
     );
@@ -44,14 +76,10 @@ export function PhonePlayer({ generation: g }: { generation: PlayerSource }) {
   if (g.part1VideoUrl) {
     return (
       <PhoneFrame label="Part 1 preview (0-10s)">
-        <video
+        <PlayerVideo
           key={g.part1VideoUrl}
           src={g.part1VideoUrl}
-          controls
-          playsInline
-          preload="metadata"
-          className="size-full bg-black object-contain"
-          aria-label={`${g.title}, part 1 preview, first 10 seconds`}
+          label={`${g.title}, part 1 preview, first 10 seconds`}
         />
       </PhoneFrame>
     );

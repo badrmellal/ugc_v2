@@ -29,6 +29,8 @@ export function Dialog({
   dismissible = true,
 }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  /** Whether the current click started on the backdrop (not a text selection dragged out of the panel). */
+  const pressStartedOnBackdrop = useRef(false);
   const titleId = useId();
   const descriptionId = useId();
 
@@ -50,9 +52,15 @@ export function Dialog({
       onClose={() => {
         if (open) onClose();
       }}
+      onPointerDown={(event) => {
+        pressStartedOnBackdrop.current = event.target === event.currentTarget;
+      }}
       onClick={(event) => {
-        // Clicks on the backdrop target the <dialog> element itself.
-        if (dismissible && event.target === event.currentTarget) onClose();
+        // Clicks on the backdrop target the <dialog> element itself. A drag that starts inside the panel
+        // (selecting text in a field) and ends on the backdrop also targets it: ignore that one.
+        const fromBackdrop = pressStartedOnBackdrop.current;
+        pressStartedOnBackdrop.current = false;
+        if (dismissible && fromBackdrop && event.target === event.currentTarget) onClose();
       }}
       className={cn(
         'm-auto max-h-[90dvh] w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-line bg-surface p-0 text-fg shadow-2xl',

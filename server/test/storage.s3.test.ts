@@ -17,19 +17,25 @@ import {
 const ID = '3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b';
 const keys = generationKeys(ID);
 
-type Handler = (input: Record<string, unknown>, call: number) => unknown;
+interface SendOptions {
+  abortSignal?: AbortSignal;
+}
+type Handler = (input: Record<string, unknown>, call: number, options: SendOptions) => unknown;
 
 /** Minimal stand-in for S3Client: records commands by constructor name and returns canned outputs. */
 class FakeS3 {
   readonly calls: { name: string; input: Record<string, unknown> }[] = [];
   readonly handlers: Record<string, Handler> = {};
 
-  async send(command: { constructor: { name: string }; input: Record<string, unknown> }): Promise<unknown> {
+  async send(
+    command: { constructor: { name: string }; input: Record<string, unknown> },
+    options: SendOptions = {},
+  ): Promise<unknown> {
     const name = command.constructor.name;
     this.calls.push({ name, input: command.input });
     const handler = this.handlers[name];
     const count = this.calls.filter((c) => c.name === name).length;
-    return handler ? handler(command.input, count) : {};
+    return handler ? handler(command.input, count, options) : {};
   }
 
   named(name: string) {
@@ -140,6 +146,44 @@ describe('S3Storage', () => {
     expect(bodies[0]).not.toBe(bodies[1]);
   });
 
+  it('aborts the upload and rejects with the read error when the local file cannot be read', async () => {
+    const fake = new FakeS3();
+    let aborted = false;
+    // Like the real SDK: the body is piped into the request, and the request only ends through the signal.
+    fake.handlers.PutObjectCommand = (input, _call, options) =>
+      new Promise((_resolve, reject) => {
+        options.abortSignal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(Object.assign(new Error('Request aborted'), { name: 'AbortError' }));
+        });
+        (input.Body as Readable).destroy(Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' }));
+      });
+    const file = path.join(dir, 'part1.mp4');
+    await writeFile(file, 'video');
+    await expect(storageWith(fake).putFile(keys.part1, file, 'video/mp4')).rejects.toThrow('EIO');
+    expect(aborted).toBe(true);
+    expect(fake.named('PutObjectCommand')).toHaveLength(1);
+  });
+
+  it('rejects uploads of missing local files without calling S3', async () => {
+    const fake = new FakeS3();
+    await expect(storageWith(fake).putFile(keys.part1, path.join(dir, 'missing.mp4'), 'video/mp4')).rejects.toThrow(
+      /ENOENT/,
+    );
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('does not retry uploads on 501 Not Implemented', async () => {
+    const fake = new FakeS3();
+    fake.handlers.PutObjectCommand = () => {
+      throw httpError('NotImplemented', 501);
+    };
+    const file = path.join(dir, 'part1.mp4');
+    await writeFile(file, 'video');
+    await expect(storageWith(fake).putFile(keys.part1, file, 'video/mp4')).rejects.toThrow();
+    expect(fake.named('PutObjectCommand')).toHaveLength(1);
+  });
+
   it('does not retry uploads on client errors', async () => {
     const fake = new FakeS3();
     fake.handlers.PutObjectCommand = () => {
@@ -205,6 +249,32 @@ describe('S3Storage', () => {
     expect(isStorageNotFound(await rejection(s3.downloadToFile(keys.final, path.join(dir, 'x.mp4'))))).toBe(true);
   });
 
+  it('does not report a missing bucket as a missing object', async () => {
+    const fake = new FakeS3();
+    const noSuchBucket = () => httpError('NoSuchBucket', 404);
+    fake.handlers.GetObjectCommand = () => {
+      throw noSuchBucket();
+    };
+    fake.handlers.DeleteObjectCommand = () => {
+      throw noSuchBucket();
+    };
+    const s3 = storageWith(fake);
+    const readErr = await rejection(s3.getBuffer(keys.final));
+    expect(isStorageNotFound(readErr)).toBe(false);
+    expect((readErr as Error).name).toBe('NoSuchBucket');
+    await expect(s3.delete(keys.final)).rejects.toMatchObject({ name: 'NoSuchBucket' });
+  });
+
+  it('maps an unsatisfiable range to invalid_range', async () => {
+    const fake = new FakeS3();
+    fake.handlers.GetObjectCommand = () => {
+      throw httpError('InvalidRange', 416);
+    };
+    const err = await rejection(storageWith(fake).createReadStream(keys.final, { start: 100, end: 200 }));
+    expect(err).toBeInstanceOf(StorageError);
+    expect((err as StorageError).code).toBe('invalid_range');
+  });
+
   it('downloads to a file and reads buffers', async () => {
     const fake = new FakeS3();
     fake.handlers.GetObjectCommand = () => ({ Body: Readable.from([Buffer.from('hello '), Buffer.from('world')]) });
@@ -229,6 +299,17 @@ describe('S3Storage', () => {
     const dest = path.join(dir, 'broken.mp4');
     await expect(storageWith(fake).downloadToFile(keys.part1, dest)).rejects.toThrow('connection reset');
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('releases the response body when the destination cannot be created', async () => {
+    const fake = new FakeS3();
+    const body = Readable.from([Buffer.from('data')]);
+    fake.handlers.GetObjectCommand = () => ({ Body: body });
+    await writeFile(path.join(dir, 'blocker'), 'a file, not a directory');
+    await expect(
+      storageWith(fake).downloadToFile(keys.part1, path.join(dir, 'blocker', 'part1.mp4')),
+    ).rejects.toThrow();
+    expect(body.destroyed).toBe(true);
   });
 
   it('copies with an encoded CopySource', async () => {

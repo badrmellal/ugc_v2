@@ -168,7 +168,9 @@ function formatWait(seconds: number): string {
   return `${Math.ceil(seconds / 60)} minutes`;
 }
 
-type Limiter = (req: FastifyRequest) => Promise<{ isAllowed: true } | { isAllowed: false; isExceeded: boolean; ttlInSeconds: number }>;
+type Limiter = (
+  req: FastifyRequest,
+) => Promise<{ isAllowed: true } | { isAllowed: false; isExceeded: boolean; ttlInSeconds: number }>;
 
 function limiterHook(limiter: Limiter, what: string): LimitHook {
   return async (req, reply) => {
@@ -218,8 +220,10 @@ export function buildApp(ctx: AppContext): FastifyInstance {
 
   app.decorateRequest('auth', null);
 
-  // Security headers first, so even requests rejected by the auth hook carry them.
+  // Security headers and cookie parsing first: their onRequest hooks must run before the auth hook
+  // (so rejected requests still carry security headers and the session cookie is parsed).
   app.register(helmet, helmetOptions(config));
+  app.register(cookie);
   app.after(() => {
     app.addHook('onRequest', createAuthHook(config));
     app.addHook('onSend', async (req, reply, payload) => {
@@ -228,7 +232,6 @@ export function buildApp(ctx: AppContext): FastifyInstance {
       return payload;
     });
   });
-  app.register(cookie);
   app.register(rateLimit, {
     global: true,
     max: config.rateLimit.perMinute,

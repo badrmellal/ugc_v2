@@ -150,6 +150,12 @@ describe('LocalStorage', () => {
     expect(await listFiles(storage.baseDir)).toEqual(['logs/abd.json']);
   });
 
+  it('never deletes an object stored exactly at a directory prefix', async () => {
+    await storage.putBuffer('media/clip', Buffer.from('keep'), 'application/octet-stream');
+    await storage.deletePrefix('media/clip/');
+    expect(await listFiles(storage.baseDir)).toEqual(['media/clip']);
+  });
+
   it('refuses empty or root prefixes', async () => {
     for (const prefix of ['', '/', '//', '../', 'a//']) {
       const err = await rejection(storage.deletePrefix(prefix));
@@ -163,6 +169,13 @@ describe('LocalStorage', () => {
     await storage.downloadToFile('a/final.mp4', dest);
     expect((await readFile(dest)).toString()).toBe('video bytes');
     expect(isStorageNotFound(await rejection(storage.downloadToFile('a/none.mp4', dest)))).toBe(true);
+    // A failed download keeps the previous file and leaves no temp file behind.
+    expect((await readFile(dest)).toString()).toBe('video bytes');
+    expect(await readdir(path.dirname(dest))).toEqual(['final.mp4']);
+
+    await storage.putBuffer('a/final.mp4', Buffer.from('new bytes'), 'video/mp4');
+    await storage.downloadToFile('a/final.mp4', dest);
+    expect((await readFile(dest)).toString()).toBe('new bytes');
   });
 
   it('rejects invalid keys everywhere', async () => {

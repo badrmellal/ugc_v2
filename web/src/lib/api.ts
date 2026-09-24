@@ -141,7 +141,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError(0, 'network_error', 'Could not reach the server. Check your connection and try again.');
   }
 
-  const text = response.status === 204 ? '' : await response.text();
+  let text = '';
+  if (response.status !== 204) {
+    try {
+      text = await response.text();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      // The connection dropped while the body was streaming.
+      throw new ApiError(0, 'network_error', 'Could not reach the server. Check your connection and try again.');
+    }
+  }
   if (!response.ok) {
     const error = buildApiError(response.status, parseJson(text));
     if (response.status === 401 && !options.skipUnauthorizedHandler) notifyUnauthorized();
@@ -189,7 +198,15 @@ export function previewPlan(body: PlanRequest, signal?: AbortSignal): Promise<Sc
   return request<ScriptPlan>('/api/plan', { method: 'POST', json: body, signal });
 }
 
-export function estimateCost(body: EstimateRequest, signal?: AbortSignal): Promise<CostBreakdown> {
+/**
+ * `EstimateRequest` plus the optional `reinforceCharacterOnExtend` flag that POST /api/estimate also
+ * accepts, so the estimate includes the second image input when that option is on.
+ */
+export type EstimateInput = EstimateRequest & {
+  settings: EstimateRequest['settings'] & { reinforceCharacterOnExtend?: boolean };
+};
+
+export function estimateCost(body: EstimateInput, signal?: AbortSignal): Promise<CostBreakdown> {
   return request<CostBreakdown>('/api/estimate', { method: 'POST', json: body, signal });
 }
 

@@ -36,18 +36,18 @@ export function updateSegmentField(plan: ScriptPlan, index: 0 | 1, field: Segmen
 }
 
 /**
- * Identifies the inputs a split was made from. Resolution does not change the prompts,
- * so it is left out and switching resolution never marks a preview as stale.
+ * Identifies the inputs a split was made from: the script and the settings that change what is said
+ * or shown (the same list the server uses to decide whether a regeneration needs a new split).
+ * Resolution, image mode and the part 2 image option only change how the prompts are rendered, and the
+ * server rebuilds the prompts from the split fields anyway, so changing them never makes a preview stale.
  */
 export function planBasisKey(script: string, settings: GenerationSettings): string {
   return JSON.stringify({
     script: script.trim(),
     style: settings.style,
-    imageMode: settings.imageMode,
     language: settings.language.trim(),
     voiceHint: settings.voiceHint.trim(),
     extraDirections: settings.extraDirections.trim(),
-    reinforceCharacterOnExtend: settings.reinforceCharacterOnExtend,
   });
 }
 
@@ -64,6 +64,26 @@ export function planForSubmit(
   if (!plan) return undefined;
   if (opts.stale && !opts.edited) return undefined;
   return plan;
+}
+
+/**
+ * The `plan` field of a full regeneration request (see RegenerateRequest):
+ * - `undefined` (omitted): the split shown is the source video's own, untouched and still up to date, so
+ *   the server keeps it (and rebuilds its prompts if only render settings changed) without re-labelling
+ *   it as an edited split.
+ * - a plan: a new preview or an edited split, used as is.
+ * - `null`: no split (discarded, or an untouched preview that is out of date): the server splits the
+ *   script again.
+ */
+export function planForRegenerate(
+  plan: ScriptPlan | null,
+  sourcePlan: ScriptPlan | null,
+  opts: { stale: boolean; edited: boolean },
+): ScriptPlan | null | undefined {
+  const submitted = planForSubmit(plan, opts);
+  if (!submitted) return null;
+  if (submitted === sourcePlan && !opts.edited && !opts.stale) return undefined;
+  return submitted;
 }
 
 /** Returns only the part 2 fields that differ from the original (compared after trimming). */

@@ -38,18 +38,28 @@ const TIMECODE_PREFIX =
   /^(?:\d{1,2}:\d{2}\s*(?:-|\u2013)\s*\d{1,2}:\d{2}|\d{1,2}(?:\.\d)?s?\s*(?:-|\u2013)\s*\d{1,2}(?:\.\d)?s)\s*[:-]?\s+/i;
 const DIRECTION_CUE =
   /^(?:smil|laugh|chuckl|giggl|paus|beat\b|hold|point|show|pick|lift|rais|turn|look|lean|nod|shrug|gestur|wink|sigh|gasp|whisper|excited|sarcastic|soft|cut\b|b-?roll|on[- ]?screen|text\b|caption|sfx|sound|music|zoom|close[- ]?up|camera|tap|sip|drink|appl|open|walk|sit|stand|wave|clap|hand|to camera|tone|holds?\b|reveal|demonstrat|puts?\b|places?\b|grabs?\b|touch|shak|squeez|pour|spray|rub|mix|stir|writ|draw|visual|graphic|shot\b|scene\b)/i;
-const ON_SCREEN = /^(?:on[- ]?screen(?:\s+text)?|text(?:\s+on\s+screen)?|caption|title|super|lower third)\s*[:-]\s*(.+)$/i;
+const ON_SCREEN =
+  /^(?:on[- ]?screen(?:\s+text)?|text(?:\s+on\s+screen)?|caption|title|super|lower third)\s*[:-]\s*(.+)$/i;
 
 function stripOuterQuotes(s: string): string {
   const t = s.trim();
-  const m = /^["“](.*)["”]$/s.exec(t);
-  if (m && !/["“”]/.test(m[1] ?? '')) return m[1]!.trim();
+  const m = /^["\u201C](.*)["\u201D]$/s.exec(t);
+  if (m && !/["\u201C\u201D]/.test(m[1] ?? '')) return m[1]!.trim();
   return t;
 }
 
-function isDirectionText(inner: string, wholeLine: boolean): boolean {
-  if (wholeLine) return true;
-  return DIRECTION_CUE.test(inner.trim());
+/** "(she leans in)", "(he laughs)": a third-person pronoun followed by a present-tense verb. */
+const PRONOUN_CUE = /^(?:she|he|they|we)\s+\p{L}+(?:s|ing)\b/iu;
+
+export interface ParseOptions {
+  /** Treat every inline `(...)` as a stage direction (used to double-check model output). */
+  allParenthesesAreDirections?: boolean;
+}
+
+function isDirectionText(inner: string, wholeLine: boolean, opts: ParseOptions): boolean {
+  if (wholeLine || opts.allParenthesesAreDirections) return true;
+  const t = inner.trim();
+  return DIRECTION_CUE.test(t) || PRONOUN_CUE.test(t);
 }
 
 function pushSpeech(units: ScriptUnit[], text: string, endsSentence: boolean) {
@@ -59,13 +69,16 @@ function pushSpeech(units: ScriptUnit[], text: string, endsSentence: boolean) {
 }
 
 function pushDirection(units: ScriptUnit[], text: string) {
-  const t = text.replace(/\s+/g, ' ').trim().replace(/^[\s:,-]+|[\s:,-]+$/g, '');
+  const t = text
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[\s:,-]+|[\s:,-]+$/g, '');
   if (!t || TIMECODE_ONLY.test(t)) return;
   units.push({ type: 'direction', text: t });
 }
 
 /** Splits a line into speech and inline direction pieces (`[...]` always, `(...)` when it reads like a cue). */
-function parseLine(line: string, units: ScriptUnit[], nextLineContinues: boolean) {
+function parseLine(line: string, units: ScriptUnit[], nextLineContinues: boolean, opts: ParseOptions) {
   const whole = line.trim();
   const bracketed = /^\[(.*)\]$/s.exec(whole) ?? /^\((.*)\)$/s.exec(whole);
   if (bracketed && !/[[\]()]/.test(bracketed[1] ?? '')) {
@@ -79,7 +92,7 @@ function parseLine(line: string, units: ScriptUnit[], nextLineContinues: boolean
     const square = m[1] !== undefined;
     const inner = (square ? m[1] : m[2]) ?? '';
     const atStart = whole.slice(0, m.index).trim() === '';
-    if (!square && !isDirectionText(inner, atStart && m[0].length === whole.length)) continue;
+    if (!square && !isDirectionText(inner, atStart && m[0].length === whole.length, opts)) continue;
     pushSpeech(pieces, whole.slice(last, m.index), false);
     pushDirection(pieces, inner);
     last = m.index + m[0].length;
@@ -89,14 +102,14 @@ function parseLine(line: string, units: ScriptUnit[], nextLineContinues: boolean
   for (let i = pieces.length - 1; i >= 0; i--) {
     const p = pieces[i]!;
     if (p.type === 'speech') {
-      p.endsSentence = !nextLineContinues || /[.!?…。！？]["'”’)]*$/.test(p.text);
+      p.endsSentence = !nextLineContinues || /[.!?\u2026\u3002\uFF01\uFF1F]["'\u201D\u2019)]*$/.test(p.text);
       break;
     }
   }
   units.push(...pieces);
 }
 
-export function parseScript(script: string): ParsedScript {
+export function parseScript(script: string, opts: ParseOptions = {}): ParsedScript {
   const text = stripOuterQuotes(cleanText(script, { multiline: true }));
   const lines = text
     .split('\n')
@@ -104,12 +117,12 @@ export function parseScript(script: string): ParsedScript {
     .filter((l) => l && !HEADING_ONLY.test(l) && !TIMECODE_ONLY.test(l));
   const units: ScriptUnit[] = [];
   lines.forEach((raw, i) => {
-    let line = raw.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '');
+    let line = raw.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s+/, '');
     line = line.replace(TIMECODE_PREFIX, '').replace(LABEL, '').replace(CAPS_LABEL, '');
     line = stripOuterQuotes(line);
     const next = lines[i + 1] ?? '';
     const continues = /[,;:]$/.test(line) || /^\p{Ll}/u.test(next);
-    parseLine(line, units, continues);
+    parseLine(line, units, continues, opts);
   });
   // Split each speech unit into sentences.
   const out: ScriptUnit[] = [];
@@ -167,12 +180,12 @@ const ABBREVIATIONS = new Set([
   'cf',
   'al',
 ]);
-const LATIN_TERMINATORS = '.!?…';
-const CJK_TERMINATORS = '。！？';
-const CLOSERS = '"\')]}”’»」』）';
+const LATIN_TERMINATORS = '.!?\u2026';
+const CJK_TERMINATORS = '\u3002\uFF01\uFF1F';
+const CLOSERS = '"\')]}\u201D\u2019\u00BB\u300D\u300F\uFF09';
 
 function endsWithTerminal(s: string): boolean {
-  return /[.!?…。！？]["'”’)」』）]*$/.test(s.trim());
+  return /[.!?\u2026\u3002\uFF01\uFF1F]["'\u201D\u2019)\u300D\u300F\uFF09]*$/.test(s.trim());
 }
 
 function isLatinBoundary(text: string, sentenceStart: number, punctStart: number, punct: string, after: number) {
@@ -191,7 +204,7 @@ function isLatinBoundary(text: string, sentenceStart: number, punctStart: number
     }
   }
   // "etc. and", "e.g. vitamin", "so... what": a lowercase continuation is not a new sentence.
-  if (/^[.…]+$/.test(punct) && /^\p{Ll}/u.test(next)) return false;
+  if (/^[.\u2026]+$/.test(punct) && /^\p{Ll}/u.test(next)) return false;
   return true;
 }
 
@@ -283,9 +296,9 @@ function intraBoundaries(text: string): { offset: number; level: 'clause' | 'wor
     const prev = text.charAt(i - 1);
     const ch = text.charAt(i);
     if (/\s/.test(ch)) {
-      if (/[,;:]/.test(prev) || /^\s[-–]\s/.test(text.slice(i, i + 3))) out.push({ offset: i, level: 'clause' });
+      if (/[,;:]/.test(prev) || /^\s[-\u2013]\s/.test(text.slice(i, i + 3))) out.push({ offset: i, level: 'clause' });
       else if (!/\s/.test(prev)) out.push({ offset: i, level: 'word' });
-    } else if (/[、，；：]/.test(prev) && !CLOSERS.includes(ch)) {
+    } else if (/[\u3001\uFF0C\uFF1B\uFF1A]/.test(prev) && !CLOSERS.includes(ch)) {
       out.push({ offset: i, level: 'clause' });
     } else if (CJK_CHAR.test(prev) && CJK_CHAR.test(ch)) {
       out.push({ offset: i, level: 'word' });
@@ -311,11 +324,10 @@ export function chooseSplit(units: ScriptUnit[]): SplitResult {
   };
 
   const totalSec = speechIdx.reduce((s, i) => s + seconds(units[i]!.text), 0);
-  const onlyOneShortSentence = speechIdx.length === 1 && countWords(units[speechIdx[0]!]!.text) < 12;
-  if (speechIdx.length === 0 || onlyOneShortSentence) {
-    // Nothing (or too little) to split: keep all speech in part 1, spread directions by position.
-    const firstSpeech = speechIdx[0] ?? units.length;
-    const cut = speechIdx.length ? Math.max(firstSpeech + 1, 1) : Math.ceil(units.length / 2);
+  const totalWords = speechIdx.reduce((s, i) => s + countWords(units[i]!.text), 0);
+  if (speechIdx.length === 0 || totalWords < 12) {
+    // Nothing (or too little) to split: keep all speech in part 1, later directions go to part 2.
+    const cut = speechIdx.length ? speechIdx[speechIdx.length - 1]! + 1 : Math.ceil(units.length / 2);
     return { part1: collect(0, cut), part2: collect(cut, units.length), level: 'none' };
   }
 
@@ -383,7 +395,7 @@ function directionsToSegment(directions: string[]): { action: string; onScreenTe
   for (const d of directions) {
     const onScreen = ON_SCREEN.exec(d);
     if (onScreen) {
-      texts.push((onScreen[1] ?? '').replace(/^["'“‘]|["'”’]$/g, '').trim());
+      texts.push((onScreen[1] ?? '').replace(/^["'\u201C\u2018]|["'\u201D\u2019]$/g, '').trim());
     } else if (/\bmusic\b|\bsfx\b|sound effect/i.test(d)) {
       audio.push(d);
     } else {

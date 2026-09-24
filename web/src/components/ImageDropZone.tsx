@@ -27,6 +27,8 @@ export function ImageDropZone({
   error?: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  /** Increments on every pick so a slow read of an earlier file cannot replace a newer choice. */
+  const pickSeq = useRef(0);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
@@ -36,9 +38,11 @@ export function ImageDropZone({
 
   const accept = async (file: File | undefined) => {
     if (!file) return;
+    const seq = ++pickSeq.current;
     const problem = validateImageFile(file);
     if (problem) {
       setLocalError(problem);
+      setReading(false);
       return;
     }
     setLocalError(null);
@@ -46,15 +50,16 @@ export function ImageDropZone({
     try {
       const previewUrl = await readAsDataUrl(file);
       const size = await readImageSize(previewUrl);
+      if (seq !== pickSeq.current) return;
       if (!size) {
         setLocalError('This image could not be decoded. Try another file.');
         return;
       }
       onChange({ file, previewUrl, width: size.width, height: size.height });
     } catch {
-      setLocalError('This file could not be read. Try another image.');
+      if (seq === pickSeq.current) setLocalError('This file could not be read. Try another image.');
     } finally {
-      setReading(false);
+      if (seq === pickSeq.current) setReading(false);
     }
   };
 
@@ -143,6 +148,8 @@ export function ImageDropZone({
                   size="sm"
                   variant="ghost"
                   onClick={() => {
+                    pickSeq.current += 1;
+                    setReading(false);
                     setLocalError(null);
                     onChange(null);
                   }}
@@ -168,7 +175,8 @@ export function ImageDropZone({
               {reading ? 'Reading image...' : 'Drop an image here or click to browse'}
             </span>
             <span className="max-w-xs text-xs text-muted">
-              A clear, well-lit photo of one person, face visible. It is used for every frame of the video.
+              A clear, well-lit photo of one person with the face visible. The character in both parts of the video is
+              based on it.
             </span>
           </button>
         )}

@@ -22,13 +22,12 @@ function authMode(config: AppConfig): string {
 function logStartupSummary(config: AppConfig, logger: Logger): void {
   logger.info(
     {
-      role: config.role,
       env: config.env,
       mock: config.gemini.mock,
       models: { video: config.gemini.videoModel, splitter: config.gemini.splitterModel },
       storage: config.storage.driver,
       presignedUrls: config.storage.driver === 's3' ? config.storage.s3.presignedUrls : false,
-      auth: authMode(config),
+      auth: config.role === 'worker' ? 'not applicable (worker serves no API)' : authMode(config),
       publicOrigin: config.publicOrigin,
       dailyBudgetUsd: config.budget.dailyUsd,
       maxQueuedJobs: config.worker.maxQueuedJobs,

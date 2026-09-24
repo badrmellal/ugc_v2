@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, type ScriptPlan } from '@shared/api';
-import { diffSegmentEdits, planBasisKey, planForSubmit, updateBibleField, updateSegmentField } from './plan';
+import {
+  diffSegmentEdits,
+  planBasisKey,
+  planForRegenerate,
+  planForSubmit,
+  updateBibleField,
+  updateSegmentField,
+} from './plan';
 
 const plan: ScriptPlan = {
   source: 'llm',
@@ -50,16 +57,20 @@ describe('plan editing', () => {
 });
 
 describe('planBasisKey', () => {
-  it('ignores resolution and surrounding whitespace', () => {
+  it('ignores render-only settings and surrounding whitespace', () => {
     const a = planBasisKey('Hello world', DEFAULT_SETTINGS);
     expect(planBasisKey('  Hello world ', { ...DEFAULT_SETTINGS, resolution: '4k' })).toBe(a);
+    expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, imageMode: 'first_frame' })).toBe(a);
+    expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, reinforceCharacterOnExtend: true })).toBe(a);
   });
 
-  it('changes with the script or prompt-relevant settings', () => {
+  it('changes with the script or the settings that affect the split', () => {
     const a = planBasisKey('Hello world', DEFAULT_SETTINGS);
     expect(planBasisKey('Hello there', DEFAULT_SETTINGS)).not.toBe(a);
     expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, style: 'scientific' })).not.toBe(a);
     expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, language: 'fr' })).not.toBe(a);
+    expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, voiceHint: 'deep voice' })).not.toBe(a);
+    expect(planBasisKey('Hello world', { ...DEFAULT_SETTINGS, extraDirections: 'rainy street' })).not.toBe(a);
   });
 });
 
@@ -69,6 +80,25 @@ describe('planForSubmit', () => {
     expect(planForSubmit(plan, { stale: false, edited: false })).toBe(plan);
     expect(planForSubmit(plan, { stale: true, edited: true })).toBe(plan);
     expect(planForSubmit(plan, { stale: true, edited: false })).toBeUndefined();
+  });
+});
+
+describe('planForRegenerate', () => {
+  const fresh = { ...plan, source: 'llm' as const };
+
+  it('omits the untouched, up-to-date source split so the server keeps it', () => {
+    expect(planForRegenerate(plan, plan, { stale: false, edited: false })).toBeUndefined();
+  });
+
+  it('sends new previews and edited splits', () => {
+    expect(planForRegenerate(fresh, plan, { stale: false, edited: false })).toBe(fresh);
+    expect(planForRegenerate(plan, plan, { stale: true, edited: true })).toBe(plan);
+  });
+
+  it('sends null to split again when there is no usable split', () => {
+    expect(planForRegenerate(null, plan, { stale: false, edited: false })).toBeNull();
+    expect(planForRegenerate(plan, plan, { stale: true, edited: false })).toBeNull();
+    expect(planForRegenerate(null, null, { stale: false, edited: false })).toBeNull();
   });
 });
 

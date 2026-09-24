@@ -2,9 +2,11 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { loadConfig } from '../src/config.js';
 import {
   FfmpegMediaTools,
   MediaError,
+  createMediaTools,
   exifOrientationFilters,
   fitWithin,
   parseFrameRate,
@@ -431,6 +433,28 @@ describe('errors', () => {
     const err = await expectMediaError(media.faststart(p('plain.txt'), p('plain.mp4')), 'process_failed');
     expect(err.message).toContain('ffmpeg exited with code');
     expect(err.stderr.length).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe('configuration', () => {
+  it('builds the tools from the media settings', () => {
+    const tools = createMediaTools(
+      loadConfig({
+        GEMINI_MOCK: 'true',
+        FFMPEG_PATH: '/opt/ffmpeg/bin/ffmpeg',
+        FFPROBE_PATH: '/opt/ffmpeg/bin/ffprobe',
+        MEDIA_TIMEOUT_SEC: '900',
+      }),
+    );
+    expect(tools).toMatchObject({
+      ffmpegPath: '/opt/ffmpeg/bin/ffmpeg',
+      ffprobePath: '/opt/ffmpeg/bin/ffprobe',
+      timeoutMs: 900_000,
+    });
+  });
+
+  it('defaults to the same timeout as MEDIA_TIMEOUT_SEC', () => {
+    expect(new FfmpegMediaTools().timeoutMs).toBe(loadConfig({ GEMINI_MOCK: 'true' }).media.timeoutMs);
   });
 });
 

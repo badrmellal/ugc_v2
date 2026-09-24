@@ -46,7 +46,8 @@ export function registerMediaRoutes(app: FastifyInstance, deps: RouteDeps): void
     const key = g[kind.field];
     if (!key) throw notFound(kind.missing);
 
-    const fileName = kind.field === 'finalVideoKey' && wantsDownload(req.query) ? downloadFileName(g.title, g.id) : null;
+    const fileName =
+      kind.field === 'finalVideoKey' && wantsDownload(req.query) ? downloadFileName(g.title, g.id) : null;
     if (fileName) reply.header('content-disposition', `attachment; filename="${fileName}"`);
 
     const signedUrl = await ctx.storage.getSignedUrl(key, {

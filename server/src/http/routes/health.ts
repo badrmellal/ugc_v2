@@ -32,7 +32,8 @@ export function registerHealthRoutes(app: FastifyInstance, ctx: AppContext): voi
     if (!ready) {
       req.log.warn(
         {
-          database: database.status === 'rejected' ? String((database.reason as Error)?.message ?? database.reason) : 'ok',
+          database:
+            database.status === 'rejected' ? String((database.reason as Error)?.message ?? database.reason) : 'ok',
           storage: storage.status === 'rejected' ? String((storage.reason as Error)?.message ?? storage.reason) : 'ok',
         },
         'readiness check failed',

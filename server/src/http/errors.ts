@@ -95,7 +95,7 @@ export interface ErrorHandlerOptions {
  */
 export function createErrorHandler(opts: ErrorHandlerOptions) {
   return function errorHandler(error: FastifyError | Error, request: FastifyRequest, reply: FastifyReply) {
-    let status = 500;
+    let status: number;
     let body: ApiErrorBody;
 
     if (error instanceof HttpError) {

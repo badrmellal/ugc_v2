@@ -1,9 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export type RangeResult =
-  | { kind: 'none' }
-  | { kind: 'range'; start: number; end: number }
-  | { kind: 'unsatisfiable' };
+export type RangeResult = { kind: 'none' } | { kind: 'range'; start: number; end: number } | { kind: 'unsatisfiable' };
 
 const SINGLE_RANGE = /^bytes=(\d*)-(\d*)$/;
 
@@ -28,11 +25,13 @@ export function parseRange(header: string | undefined, size: number): RangeResul
 
   const start = Number(startStr);
   if (!Number.isSafeInteger(start)) return { kind: 'none' };
-  let end = endStr === '' ? size - 1 : Number(endStr);
-  if (!Number.isSafeInteger(end)) return { kind: 'none' };
-  if (end < start) return { kind: 'none' };
+  if (endStr !== '') {
+    const lastByte = Number(endStr);
+    // A last-byte-pos below the first-byte-pos makes the range-spec invalid: ignore the header.
+    if (!Number.isSafeInteger(lastByte) || lastByte < start) return { kind: 'none' };
+  }
   if (start >= size) return { kind: 'unsatisfiable' };
-  end = Math.min(end, size - 1);
+  const end = endStr === '' ? size - 1 : Math.min(Number(endStr), size - 1);
   return { kind: 'range', start, end };
 }
 

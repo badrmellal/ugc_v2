@@ -14,7 +14,8 @@ import {
   useGeneration,
 } from '../lib/hooks';
 import { IMAGE_MODE_LABELS, RESOLUTION_LABELS, STYLE_LABELS, languageLabel } from '../lib/options';
-import { planBasisKey, planForSubmit } from '../lib/plan';
+import { preventImplicitSubmit } from '../lib/forms';
+import { planBasisKey, planForRegenerate, planForSubmit } from '../lib/plan';
 import { issueList, validateCreateForm } from '../lib/validation';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
@@ -91,7 +92,8 @@ function normalizeSettings(settings: GenerationSettings): GenerationSettings {
 interface SubmitVars {
   script: string;
   settings: GenerationSettings;
-  plan: ScriptPlan | undefined;
+  /** Split to send: see planForSubmit (new video) and planForRegenerate (edit and regenerate). */
+  plan: ScriptPlan | null | undefined;
   image: File | null;
 }
 
@@ -103,12 +105,14 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
   const regenerating = source !== null;
 
   const [initial] = useState(() => initialState(config, source));
+  // The source's split as loaded; later refetches of the source must not change what counts as "untouched".
+  const [sourcePlan] = useState<ScriptPlan | null>(() => source?.plan ?? null);
   const [script, setScript] = useState(initial.script);
   const [settings, setSettings] = useState<GenerationSettings>(initial.settings);
   const [image, setImage] = useState<SelectedImage | null>(null);
-  const [plan, setPlan] = useState<ScriptPlan | null>(source?.plan ?? null);
+  const [plan, setPlan] = useState<ScriptPlan | null>(sourcePlan);
   const [planBasis, setPlanBasis] = useState<string | null>(() =>
-    source?.plan ? planBasisKey(initial.script, initial.settings) : null,
+    sourcePlan ? planBasisKey(initial.script, initial.settings) : null,
   );
   const [planEdited, setPlanEdited] = useState(false);
   const [confirmReplacePlan, setConfirmReplacePlan] = useState(false);
@@ -122,7 +126,7 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
 
   const issues = validateCreateForm({ script, settings, hasImage: regenerating || image !== null });
   const blocking = issueList(issues);
-  const canPlan = !issues.script && !issues.language && !issues.extraDirections;
+  const canPlan = !issues.script && !issues.language && !issues.voiceHint && !issues.extraDirections;
   const planStale = plan !== null && planBasis !== planBasisKey(script, settings);
 
   const planMutation = useMutation({
@@ -142,8 +146,8 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
           mode: 'full',
           script: vars.script,
           settings: vars.settings,
-          // null = no reviewed split: the server splits the (possibly edited) script again.
-          plan: vars.plan ?? null,
+          // Omitted: keep the source's split. null: split the (possibly edited) script again.
+          ...(vars.plan !== undefined ? { plan: vars.plan } : {}),
         });
       }
       if (!vars.image) return Promise.reject(new Error('Add a character image.'));
@@ -183,13 +187,18 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
     planMutation.reset();
   };
 
+  // Generating while a preview is still running would split the script twice and ignore the preview.
+  const waitingForSplit = planMutation.isPending;
+  const submitNotes = waitingForSplit ? [...blocking, 'Wait for the split preview to finish.'] : blocking;
+
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (blocking.length > 0 || submitMutation.isPending) return;
+    if (blocking.length > 0 || waitingForSplit || submitMutation.isPending) return;
+    const planState = { stale: planStale, edited: planEdited };
     submitMutation.mutate({
       script: script.trim(),
       settings: normalizeSettings(settings),
-      plan: planForSubmit(plan, { stale: planStale, edited: planEdited }),
+      plan: source ? planForRegenerate(plan, sourcePlan, planState) : planForSubmit(plan, planState),
       image: image?.file ?? null,
     });
   };
@@ -233,7 +242,12 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
         )}
       </header>
 
-      <form onSubmit={onSubmit} noValidate className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
+      <form
+        onSubmit={onSubmit}
+        onKeyDown={preventImplicitSubmit}
+        noValidate
+        className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start"
+      >
         <div className="min-w-0 space-y-6">
           <Card>
             <ScriptEditor value={script} onChange={setScript} />
@@ -247,7 +261,11 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
               onChange={(patch) => setSettings((current) => ({ ...current, ...patch }))}
               pricing={config.pricing}
               resolutions={config.resolutions}
-              issues={{ language: issues.language, extraDirections: issues.extraDirections }}
+              issues={{
+                language: issues.language,
+                voiceHint: issues.voiceHint,
+                extraDirections: issues.extraDirections,
+              }}
             />
           </Card>
 
@@ -304,7 +322,11 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
 
         <aside className="space-y-4 lg:sticky lg:top-20" aria-label="Cost and generate">
           <Card title="Estimated cost" description={`${RESOLUTION_LABELS[settings.resolution]}, 2 turns of 10 seconds`}>
-            <CostEstimate resolution={settings.resolution} mode="full" />
+            <CostEstimate
+              resolution={settings.resolution}
+              mode="full"
+              reinforceCharacterOnExtend={settings.reinforceCharacterOnExtend}
+            />
           </Card>
 
           <Card>
@@ -326,17 +348,17 @@ function CreateForm({ config, source }: { config: AppConfigResponse; source: Gen
               variant="primary"
               size="lg"
               className="mt-4 w-full"
-              disabled={blocking.length > 0}
+              disabled={submitNotes.length > 0}
               loading={submitMutation.isPending}
-              aria-describedby={blocking.length > 0 ? checklistId : undefined}
+              aria-describedby={submitNotes.length > 0 ? checklistId : undefined}
               icon={<Sparkles className="size-5" aria-hidden="true" />}
             >
               {regenerating ? 'Regenerate video' : 'Generate 20s video'}
             </Button>
 
-            {blocking.length > 0 && (
+            {submitNotes.length > 0 && (
               <ul id={checklistId} className="mt-3 space-y-1 text-xs text-muted">
-                {blocking.map((issue) => (
+                {submitNotes.map((issue) => (
                   <li key={issue} className="flex gap-1.5">
                     <span aria-hidden="true">•</span>
                     {issue}

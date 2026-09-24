@@ -28,8 +28,8 @@ export function ErrorAlert({
           <p className="mt-0.5 break-words text-muted">{described.message}</p>
           {described.details.length > 0 && (
             <ul className="mt-2 list-disc space-y-0.5 pl-4 text-muted">
-              {described.details.map((line) => (
-                <li key={line}>{line}</li>
+              {described.details.map((line, index) => (
+                <li key={`${index}-${line}`}>{line}</li>
               ))}
             </ul>
           )}

@@ -18,7 +18,7 @@ import {
   isKnownLanguage,
   pricePerVideo,
 } from '../lib/options';
-import type { CreateFormIssues } from '../lib/validation';
+import { VOICE_HINT_MAX_CHARS, type CreateFormIssues } from '../lib/validation';
 import { cn } from '../lib/cn';
 import { Collapsible } from './Collapsible';
 import { Field, describedBy, inputClass } from './Field';
@@ -78,7 +78,7 @@ export function SettingsPanel({
       />
       <Collapsible
         summary="Advanced: language, voice and directions"
-        defaultOpen={Boolean(issues.language || issues.extraDirections)}
+        defaultOpen={Boolean(issues.language || issues.voiceHint || issues.extraDirections)}
       >
         <AdvancedSettings settings={settings} onChange={onChange} issues={issues} />
       </Collapsible>
@@ -119,7 +119,8 @@ function ResolutionPicker({
         onChange={onChange}
       />
       <p className="mt-1.5 text-xs text-muted">
-        Prices are video output for a 20-second video. Higher resolutions take longer to generate.
+        Prices are the video output cost of one 20-second video; input and text tokens are extra (see the estimate).
+        Higher resolutions take longer to generate.
       </p>
     </div>
   );
@@ -194,12 +195,22 @@ function AdvancedSettings({
         htmlFor={`${id}-voice`}
         hint="Optional. For example: warm, energetic female voice, American accent, conversational."
         hintId={`${id}-voice-hint`}
+        error={issues.voiceHint}
+        errorId={`${id}-voice-error`}
+        aside={
+          settings.voiceHint.length > VOICE_HINT_MAX_CHARS * 0.8 ? (
+            <span className={cn('tabular-nums', issues.voiceHint && 'text-danger')}>
+              {settings.voiceHint.length} / {VOICE_HINT_MAX_CHARS}
+            </span>
+          ) : undefined
+        }
       >
         <input
           id={`${id}-voice`}
           value={settings.voiceHint}
           onChange={(event) => onChange({ voiceHint: event.target.value })}
-          aria-describedby={`${id}-voice-hint`}
+          aria-invalid={issues.voiceHint ? true : undefined}
+          aria-describedby={issues.voiceHint ? `${id}-voice-error` : `${id}-voice-hint`}
           className={inputClass}
         />
       </Field>

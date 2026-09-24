@@ -17,7 +17,8 @@ export function EventLog({ events }: { events: GenerationEvent[] }) {
   const sorted = [...events].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
   const start = sorted[0]?.at ?? null;
   return (
-    <ol className="max-h-96 space-y-2 overflow-y-auto pr-1 text-sm" aria-label="Event log">
+    // Focusable so keyboard users can scroll a long log.
+    <ol tabIndex={0} className="max-h-96 space-y-2 overflow-y-auto pr-1 text-sm" aria-label="Event log">
       {sorted.map((event, index) => (
         <li key={`${event.at}-${index}`} className="flex gap-3">
           <time

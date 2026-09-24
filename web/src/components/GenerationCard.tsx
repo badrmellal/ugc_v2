@@ -1,4 +1,5 @@
 import { Clock, RefreshCw, Scissors } from 'lucide-react';
+import { useState } from 'react';
 import { Link } from 'react-router';
 import type { GenerationListItem } from '@shared/api';
 import { formatDateTime, formatRelativeTime, formatUsd, formatVideoLength } from '../lib/format';
@@ -6,7 +7,9 @@ import { RESOLUTION_LABELS, STYLE_LABELS } from '../lib/options';
 import { StatusBadge, Tag } from './StatusBadge';
 
 export function GenerationCard({ item, now }: { item: GenerationListItem; now: number }) {
-  const image = item.thumbnailUrl ?? item.characterImageUrl;
+  // Falls back to the character image when the thumbnail is missing or fails to load.
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
+  const image = item.thumbnailUrl && !thumbnailFailed ? item.thumbnailUrl : item.characterImageUrl;
   const active = item.status === 'queued' || item.status === 'running';
   return (
     <li>
@@ -20,6 +23,9 @@ export function GenerationCard({ item, now }: { item: GenerationListItem; now: n
             alt=""
             loading="lazy"
             decoding="async"
+            onError={() => {
+              if (image === item.thumbnailUrl) setThumbnailFailed(true);
+            }}
             className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
           />
           <div className="absolute top-2 left-2">

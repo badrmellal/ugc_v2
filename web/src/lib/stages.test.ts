@@ -21,6 +21,17 @@ describe('computeSteps', () => {
     ]);
   });
 
+  it('keeps finished stages of a job queued again for a retry', () => {
+    const events = [event('queued'), event('planning'), event('uploading_image'), event('generating_part1')];
+    expect(states(computeSteps({ status: 'queued', stage: 'queued', events }))).toEqual([
+      'done',
+      'done',
+      'pending',
+      'pending',
+      'pending',
+    ]);
+  });
+
   it('marks earlier stages done and the current one active while running', () => {
     expect(states(computeSteps({ status: 'running', stage: 'generating_part1', events: [] }))).toEqual([
       'done',

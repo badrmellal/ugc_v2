@@ -28,7 +28,10 @@ export function extractScriptFromPlannerPrompt(prompt: string): string | null {
   const start = prompt.indexOf(SCRIPT_START_MARKER);
   const end = prompt.lastIndexOf(SCRIPT_END_MARKER);
   if (start < 0 || end <= start) return null;
-  return prompt.slice(start + SCRIPT_START_MARKER.length, end).replace(/^\n/, '').replace(/\n$/, '');
+  return prompt
+    .slice(start + SCRIPT_START_MARKER.length, end)
+    .replace(/^\n/, '')
+    .replace(/\n$/, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +66,10 @@ export const PLAN_JSON_SCHEMA: Record<string, unknown> = {
       type: 'string',
       description: 'Manner, energy and wardrobe style of the on-camera person. No facial features, age or ethnicity.',
     },
-    setting: { type: 'string', description: 'One specific location with lighting and a few props, same for both parts.' },
+    setting: {
+      type: 'string',
+      description: 'One specific location with lighting and a few props, same for both parts.',
+    },
     voice: { type: 'string', description: 'Specific voice description: timbre, accent, pace and energy.' },
     audio: { type: 'string', description: 'Room tone, ambience and music (music only if the script asks for it).' },
     part1: { ...segmentSchema, description: 'Seconds 0-10.' },
@@ -106,7 +112,7 @@ const LlmPlan = z.object({
 export type LlmPlanOutput = z.infer<typeof LlmPlan>;
 
 const STYLE_BRIEF: Record<GenerationSettings['style'], string> = {
-  ugc: 'Authentic vertical selfie UGC: phone held at arm\'s length, eye level, natural light, the creator talks directly to the camera like a friend, casual and genuine.',
+  ugc: "Authentic vertical selfie UGC: phone held at arm's length, eye level, natural light, the creator talks directly to the camera like a friend, casual and genuine.",
   scientific:
     'Clear science explainer: a presenter talks directly to the camera with calm, authoritative delivery in a clean lab, studio or classroom look. Simple on-screen labels only if the script asks for them.',
 };
@@ -137,7 +143,7 @@ export function buildSplitPrompt(script: string, settings: GenerationSettings): 
     `Extra directions from the user: ${s.extraDirections || 'none'}`,
     'Script (between the markers):',
     SCRIPT_START_MARKER,
-    script.trim(),
+    cleanText(script, { multiline: true }),
     SCRIPT_END_MARKER,
   ].join('\n');
 }
@@ -154,18 +160,27 @@ export class PlanRejectedError extends Error {
 }
 
 /** Parses and validates model output against the script. Throws `PlanRejectedError` when unusable. */
-export function planFromModelOutput(data: unknown, script: string): Omit<ScriptPlan, 'language' | 'estimatedSpokenSeconds'> {
+export function planFromModelOutput(
+  data: unknown,
+  script: string,
+): Omit<ScriptPlan, 'language' | 'estimatedSpokenSeconds'> {
   const parsed = LlmPlan.safeParse(data);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
-    throw new PlanRejectedError(`invalid plan JSON (${issue ? `${issue.path.join('.')}: ${issue.message}` : 'unknown'})`);
+    throw new PlanRejectedError(
+      `invalid plan JSON (${issue ? `${issue.path.join('.')}: ${issue.message}` : 'unknown'})`,
+    );
   }
   const out = parsed.data;
   const d1 = cleanText(out.part1.dialogue);
   const d2 = cleanText(out.part2.dialogue);
-  const speech = parseScript(script).speech;
-  const check = checkVerbatim(speech, `${d1} ${d2}`);
-  if (!check.ok) {
+  // Parentheticals are ambiguous (aside or stage direction): accept either reading.
+  const spoken = `${d1} ${d2}`;
+  const check = checkVerbatim(parseScript(script).speech, spoken);
+  const alt = check.ok
+    ? check
+    : checkVerbatim(parseScript(script, { allParenthesesAreDirections: true }).speech, spoken);
+  if (!check.ok && !alt.ok) {
     throw new PlanRejectedError(
       `dialogue does not keep the script verbatim (${check.missing} missing, ${check.extra} extra of ${check.scriptTokens} words)`,
     );
@@ -258,7 +273,7 @@ export class DefaultScriptPlanner implements ScriptPlanner {
           temperature: SPLIT_TEMPERATURE,
           timeoutMs: this.timeoutMs,
         }),
-        this.timeoutMs + 2_000,
+        this.timeoutMs,
       );
       responded = true;
       usage = result.usage;

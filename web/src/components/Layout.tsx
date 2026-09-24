@@ -20,7 +20,11 @@ function BudgetPill({ budget }: { budget: AppConfigResponse['budget'] }) {
   )} reserved for running jobs, ${formatUsd(budget.dailyLimitUsd)} limit.`;
   return (
     <span
-      className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium tabular-nums', tone)}
+      className={cn(
+        // Hidden on very narrow phones (< 360px) so the header never scrolls sideways.
+        'hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium tabular-nums min-[360px]:inline-flex',
+        tone,
+      )}
       title={detail}
     >
       <Wallet className="size-3.5" aria-hidden="true" />
@@ -120,7 +124,12 @@ export function Layout() {
           </div>
         </div>
       </header>
-      <main id="main" className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
+      {/* tabIndex lets the skip link move keyboard focus here, not just scroll. */}
+      <main
+        id="main"
+        tabIndex={-1}
+        className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 focus:outline-none sm:px-6 sm:py-8"
+      >
         <Outlet />
       </main>
       <footer className="border-t border-line">

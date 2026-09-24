@@ -1,12 +1,18 @@
 import { ChevronRight } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { cn } from '../lib/cn';
 
-/** Disclosure built on <details>/<summary> (keyboard and screen reader support for free). */
+/**
+ * Disclosure built on <details>/<summary> (keyboard and screen reader support for free).
+ *
+ * `defaultOpen` opens it initially, and opens it again whenever it turns true later (for example when a
+ * field inside becomes invalid). It never closes the section by itself: only the user does, so fixing an
+ * error while typing does not collapse the field being edited.
+ */
 export function Collapsible({
   summary,
   children,
-  defaultOpen,
+  defaultOpen = false,
   className,
   summaryClassName,
 }: {
@@ -16,8 +22,15 @@ export function Collapsible({
   className?: string;
   summaryClassName?: string;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [lastDefaultOpen, setLastDefaultOpen] = useState(defaultOpen);
+  if (defaultOpen !== lastDefaultOpen) {
+    setLastDefaultOpen(defaultOpen);
+    if (defaultOpen) setOpen(true);
+  }
+
   return (
-    <details className={cn('group', className)} open={defaultOpen}>
+    <details className={cn('group', className)} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary
         className={cn(
           'flex list-none items-center gap-1.5 rounded-md text-sm font-medium text-muted select-none hover:text-fg',

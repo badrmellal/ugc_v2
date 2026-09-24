@@ -38,9 +38,11 @@ export function computeSteps(g: Pick<GenerationDTO, 'status' | 'stage' | 'events
     PIPELINE_STAGES.map((stage, index) => ({ stage, label: STAGE_LABELS[stage], state: stateAt(index) }));
 
   if (g.status === 'succeeded' || g.stage === 'completed') return build(() => 'done');
-  if (g.status === 'queued') return build(() => 'pending');
 
   const reached = lastReachedIndex(g);
+  // Queued: a new job has no pipeline events yet; a job waiting for a retry keeps the stages it finished.
+  if (g.status === 'queued') return build((i) => (i < reached ? 'done' : 'pending'));
+
   if (g.status === 'running') {
     if (reached < 0) return build(() => 'pending');
     return build((i) => (i < reached ? 'done' : i === reached ? 'active' : 'pending'));

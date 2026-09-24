@@ -157,7 +157,9 @@ class JobRun {
       'info',
       result.plan.source === 'llm'
         ? 'Script split into two 10s parts'
-        : 'Script split with the deterministic fallback (text model unavailable)',
+        : result.model
+          ? 'The text model split did not keep the script verbatim, used the sentence-based split instead'
+          : 'Script split with the sentence-based fallback (text model unavailable)',
     );
     for (const warning of result.plan.warnings) await this.event('warn', warning);
   }
@@ -487,6 +489,8 @@ class JobRun {
         return;
       }
       const cost = await this.computeActualCost().catch(() => null);
+      // Logged before the stage flips to `failed` so the event records where the job stopped.
+      await this.event('error', error.message);
       await this.checkpoint({
         status: 'failed',
         stage: 'failed',
@@ -498,7 +502,6 @@ class JobRun {
         lockedBy: null,
         lockedUntil: null,
       });
-      await this.event('error', error.message);
     } catch (inner) {
       if (!(inner instanceof LeaseLostError)) {
         this.log.error({ err: this.safeErr(inner) }, 'failed to record job failure');
@@ -512,6 +515,7 @@ class JobRun {
     }
     const cost = await this.computeActualCost().catch(() => null);
     try {
+      await this.event('info', 'Generation canceled');
       await this.checkpoint({
         status: 'canceled',
         stage: 'canceled',
@@ -523,7 +527,6 @@ class JobRun {
         lockedBy: null,
         lockedUntil: null,
       });
-      await this.event('info', 'Generation canceled');
     } catch (err) {
       if (!(err instanceof LeaseLostError)) throw err;
     }

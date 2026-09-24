@@ -1,5 +1,17 @@
 import { randomBytes } from 'node:crypto';
-import { copyFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, type FileHandle } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  type FileHandle,
+} from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import type { ReadRange, StorageDriver, StoredObjectInfo } from '../core/ports.js';
@@ -57,10 +69,15 @@ export class LocalStorage implements StorageDriver {
 
   async downloadToFile(key: string, localPath: string): Promise<void> {
     const src = this.resolvePath(key);
-    await mkdir(path.dirname(path.resolve(localPath)), { recursive: true });
+    const dest = path.resolve(localPath);
+    await mkdir(path.dirname(dest), { recursive: true });
+    // Copy next to the destination and rename, so a failed copy never leaves a truncated file behind.
+    const tmp = `${dest}.${randomBytes(6).toString('hex')}.part`;
     try {
-      await copyFile(src, localPath);
+      await copyFile(src, tmp);
+      await rename(tmp, dest);
     } catch (err) {
+      await rm(tmp, { force: true }).catch(() => undefined);
       throw mapNotFound(err, key);
     }
   }
@@ -133,7 +150,13 @@ export class LocalStorage implements StorageDriver {
   async deletePrefix(prefix: string): Promise<void> {
     assertValidPrefix(prefix);
     if (prefix.endsWith('/')) {
-      await rm(this.resolvePath(prefix.slice(0, -1)), { recursive: true, force: true });
+      // `a/b/` only matches objects inside the directory `a/b`, never an object stored at `a/b` itself.
+      const dir = this.resolvePath(prefix.slice(0, -1));
+      const st = await lstat(dir).catch((err: unknown) => {
+        if (isMissing(err)) return null;
+        throw err;
+      });
+      if (st?.isDirectory()) await rm(dir, { recursive: true, force: true });
       return;
     }
     const full = this.resolvePath(prefix);

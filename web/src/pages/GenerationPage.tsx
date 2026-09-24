@@ -111,8 +111,17 @@ function GenerationView({
         >
           <WifiOff className="size-4 shrink-0 text-warn" aria-hidden="true" />
           <p className="min-w-0 flex-1">
-            <span className="font-medium">Live updates paused.</span>{' '}
-            <span className="text-muted">{describeError(liveError).message}</span>
+            {isNotFound(liveError) ? (
+              <>
+                <span className="font-medium">This video no longer exists.</span>{' '}
+                <span className="text-muted">It may have been deleted in another tab or by another user.</span>
+              </>
+            ) : (
+              <>
+                <span className="font-medium">Live updates paused.</span>{' '}
+                <span className="text-muted">{describeError(liveError).message}</span>
+              </>
+            )}
           </p>
           <Button
             size="sm"
@@ -324,7 +333,10 @@ function OutputPanel({ generation: g, model }: { generation: GenerationDTO; mode
     ['Resolution', `${RESOLUTION_LABELS[s.resolution]}, 9:16`],
     ['Style', STYLE_LABELS[s.style]],
     ['Image mode', IMAGE_MODE_LABELS[s.imageMode]],
-    ['Language', `${languageLabel(s.language)} (${s.language})`],
+    [
+      'Language',
+      languageLabel(s.language) === s.language ? s.language : `${languageLabel(s.language)} (${s.language})`,
+    ],
     ['Reinforce character in part 2', s.reinforceCharacterOnExtend ? 'Yes' : 'No'],
   ];
   if (s.voiceHint) rows.push(['Voice direction', s.voiceHint]);

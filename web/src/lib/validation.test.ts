@@ -19,6 +19,32 @@ describe('validateCreateForm', () => {
     expect(bad.language).toBeDefined();
     const ok = validateCreateForm({ script, settings: { ...DEFAULT_SETTINGS, language: 'pt-BR' }, hasImage: true });
     expect(ok.language).toBeUndefined();
+    // Same pattern as the server: at most three subtags.
+    const long = validateCreateForm({
+      script,
+      settings: { ...DEFAULT_SETTINGS, language: 'en-Latn-US-x1-y2' },
+      hasImage: true,
+    });
+    expect(long.language).toBeDefined();
+  });
+
+  it('applies the server limit to the voice direction and extra directions', () => {
+    const script = 'This is a perfectly fine script for a short video.';
+    const tooLong = 'a'.repeat(LIMITS.extraDirectionsMaxChars + 1);
+    const issues = validateCreateForm({
+      script,
+      settings: { ...DEFAULT_SETTINGS, voiceHint: tooLong, extraDirections: tooLong },
+      hasImage: true,
+    });
+    expect(issues.voiceHint).toBeDefined();
+    expect(issues.extraDirections).toBeDefined();
+    // Surrounding whitespace is trimmed by the server before the length check.
+    const padded = validateCreateForm({
+      script,
+      settings: { ...DEFAULT_SETTINGS, voiceHint: ` ${'a'.repeat(LIMITS.extraDirectionsMaxChars)} ` },
+      hasImage: true,
+    });
+    expect(padded.voiceHint).toBeUndefined();
   });
 });
 
@@ -26,6 +52,7 @@ describe('validateImageFile', () => {
   it('accepts supported images within the size limit', () => {
     expect(validateImageFile({ name: 'a.jpg', type: 'image/jpeg', size: 1000 })).toBeNull();
     expect(validateImageFile({ name: 'a.webp', type: '', size: 1000 })).toBeNull();
+    expect(validateImageFile({ name: 'a.PNG', type: 'application/octet-stream', size: 1000 })).toBeNull();
   });
 
   it('rejects other types, empty and oversized files', () => {

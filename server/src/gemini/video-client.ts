@@ -52,8 +52,8 @@ export interface OmniVideoResponseFormat {
   type: 'video';
   aspect_ratio?: '9:16' | '16:9';
   duration?: string;
-  resolution: Resolution;
-  delivery: 'uri';
+  resolution?: Resolution;
+  delivery?: 'uri';
 }
 
 /** Body of `interactions.create` for one Omni turn. */
@@ -69,6 +69,10 @@ export interface BuildTurnOptions {
   background: boolean;
   /** Send `duration` on the extension turn (always sent on the initial turn). */
   includeDuration: boolean;
+  /** Send `resolution` on the extension turn (default true; always sent on the initial turn). */
+  includeExtensionResolution?: boolean;
+  /** Request `delivery: 'uri'` (default true). When false the API default (inline data) applies. */
+  uriDelivery?: boolean;
 }
 
 function durationString(sec: number): string {
@@ -99,7 +103,7 @@ export function ensureImageTag(prompt: string, kind: 'initial' | 'extension', im
 export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: BuildTurnOptions): OmniTurnParams {
   const prompt = req.prompt.trim();
   if (!prompt) throw new VideoModelError('invalid_request', 'The prompt for this turn is empty.', { retryable: false });
-  const responseFormat: OmniVideoResponseFormat = { type: 'video', resolution: req.resolution, delivery: 'uri' };
+  const delivery: Pick<OmniVideoResponseFormat, 'delivery'> = opts.uriDelivery === false ? {} : { delivery: 'uri' };
 
   if (req.kind === 'initial') {
     if (!req.image) {
@@ -116,7 +120,7 @@ export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: Bui
         aspect_ratio: req.aspectRatio,
         duration: durationString(req.durationSec),
         resolution: req.resolution,
-        delivery: 'uri',
+        ...delivery,
       },
     };
     if (opts.background) params.background = true;
@@ -128,6 +132,8 @@ export function buildTurnRequest(req: VideoTurnRequest, model: string, opts: Bui
       retryable: false,
     });
   }
+  const responseFormat: OmniVideoResponseFormat = { type: 'video', ...delivery };
+  if (opts.includeExtensionResolution !== false) responseFormat.resolution = req.resolution;
   if (opts.includeDuration) responseFormat.duration = durationString(req.durationSec);
   const params: OmniTurnParams = {
     model,
@@ -204,7 +210,8 @@ function collectErrorMessages(raw: Record<string, unknown>): { code: string | nu
   for (const step of currentTurnSteps(raw)) {
     if (step.type !== 'model_output' || !isRecord(step.error)) continue;
     const message = typeof step.error.message === 'string' ? step.error.message.trim() : '';
-    const code = typeof step.error.code === 'number' || typeof step.error.code === 'string' ? String(step.error.code) : null;
+    const code =
+      typeof step.error.code === 'number' || typeof step.error.code === 'string' ? String(step.error.code) : null;
     if (message || (code && code !== '0')) out.push({ code, message });
   }
   return out;
@@ -243,7 +250,9 @@ function errorInfoFor(
     return { code: 'rate_limited', message: `Gemini rate or spending limit reached (${joined}).`, retryable: true };
   }
   if (status === 'cancelled') {
-    return errors.length ? { code: 'interaction_cancelled', message: `Gemini cancelled the interaction (${joined}).`, retryable: true } : null;
+    return errors.length
+      ? { code: 'interaction_cancelled', message: `Gemini cancelled the interaction (${joined}).`, retryable: true }
+      : null;
   }
   if (status === 'incomplete') {
     return {
@@ -254,7 +263,9 @@ function errorInfoFor(
   }
   return {
     code: 'generation_failed',
-    message: joined ? `Gemini could not generate the video: ${joined}` : 'Gemini reported that the video generation failed.',
+    message: joined
+      ? `Gemini could not generate the video: ${joined}`
+      : 'Gemini reported that the video generation failed.',
     retryable: true,
   };
 }
@@ -329,6 +340,10 @@ export class GeminiVideoClient implements VideoModelClient {
   private backgroundSupported = true;
   /** Flips to false for the rest of the process if the API rejects `duration` on extension turns. */
   private extensionDurationSupported = true;
+  /** Flips to false for the rest of the process if the API rejects `resolution` on extension turns. */
+  private extensionResolutionSupported = true;
+  /** Flips to false for the rest of the process if the API rejects `delivery: 'uri'` (inline data is then used). */
+  private uriDeliverySupported = true;
 
   constructor(opts: GeminiVideoClientOptions) {
     const { config } = opts;
@@ -432,10 +447,17 @@ export class GeminiVideoClient implements VideoModelClient {
   }
 
   async startTurn(req: VideoTurnRequest): Promise<InteractionState> {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const background = this.backgroundSupported;
       const includeDuration = req.kind === 'initial' || this.extensionDurationSupported;
-      const params = buildTurnRequest(req, this.model, { background, includeDuration });
+      const includeExtensionResolution = this.extensionResolutionSupported;
+      const uriDelivery = this.uriDeliverySupported;
+      const params = buildTurnRequest(req, this.model, {
+        background,
+        includeDuration,
+        includeExtensionResolution,
+        uriDelivery,
+      });
       const promptText = req.prompt.trim();
       this.log.info(
         {
@@ -485,7 +507,26 @@ export class GeminiVideoClient implements VideoModelClient {
           );
           continue;
         }
-        this.log.warn({ generationId: req.generationId, kind: req.kind, code: e.code, status: e.status }, 'omni create failed');
+        if (req.kind === 'extension' && includeExtensionResolution && is400About(e, /resolution/i)) {
+          this.extensionResolutionSupported = false;
+          this.log.warn(
+            { generationId: req.generationId, reason: e.message },
+            'resolution rejected on extension turns, omitting it for this process',
+          );
+          continue;
+        }
+        if (uriDelivery && is400About(e, /delivery/i)) {
+          this.uriDeliverySupported = false;
+          this.log.warn(
+            { generationId: req.generationId, reason: e.message },
+            'uri delivery rejected, falling back to inline video data for this process',
+          );
+          continue;
+        }
+        this.log.warn(
+          { generationId: req.generationId, kind: req.kind, code: e.code, status: e.status },
+          'omni create failed',
+        );
         throw e;
       }
     }
@@ -495,6 +536,16 @@ export class GeminiVideoClient implements VideoModelClient {
   }
 
   async getInteraction(id: string): Promise<InteractionState> {
+    if (id.startsWith('mock_')) {
+      // Created by the mock client before GEMINI_MOCK was turned off: Google has never seen it.
+      throw new VideoModelError(
+        'interaction_lost',
+        'This interaction was created in mock mode and cannot be resumed.',
+        {
+          retryable: true,
+        },
+      );
+    }
     let raw: unknown;
     try {
       raw = await this.ai.interactions.get(id, { timeout: Math.min(this.requestTimeoutMs, 300_000) });
@@ -518,6 +569,7 @@ export class GeminiVideoClient implements VideoModelClient {
   }
 
   async cancel(id: string): Promise<void> {
+    if (id.startsWith('mock_')) return;
     try {
       await this.ai.interactions.cancel(id, { maxRetries: 1, timeout: 30_000 });
       this.log.info({ interactionId: id }, 'omni interaction cancelled');
@@ -537,7 +589,9 @@ export class GeminiVideoClient implements VideoModelClient {
         throw new VideoModelError('empty_output', 'Gemini returned an empty inline video.', { retryable: true });
       }
       if (data.length > MAX_VIDEO_BYTES) {
-        throw new VideoModelError('invalid_output', 'Gemini returned an unexpectedly large video.', { retryable: false });
+        throw new VideoModelError('invalid_output', 'Gemini returned an unexpectedly large video.', {
+          retryable: false,
+        });
       }
       await writeFile(destPath, data);
       this.log.info({ bytes: data.length, delivery: 'inline' }, 'output video saved');
@@ -596,9 +650,13 @@ export class GeminiVideoClient implements VideoModelClient {
         throw new VideoModelError('empty_output', 'The downloaded video is empty.', { retryable: true });
       }
       if (Number.isFinite(declared) && declared > 0 && size !== declared) {
-        throw new VideoModelError('download_incomplete', `The video download stopped early (${size} of ${declared} bytes).`, {
-          retryable: true,
-        });
+        throw new VideoModelError(
+          'download_incomplete',
+          `The video download stopped early (${size} of ${declared} bytes).`,
+          {
+            retryable: true,
+          },
+        );
       }
       await rename(partPath, destPath);
       this.log.info({ bytes: size, delivery: 'uri' }, 'output video saved');

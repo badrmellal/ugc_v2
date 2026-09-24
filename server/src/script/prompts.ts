@@ -33,7 +33,8 @@ export const STYLE_DEFAULTS: Record<VideoStyle, StyleDefaults> = {
     character: 'a relatable content creator with a natural, friendly and confident manner, casual everyday look',
     setting: 'a tidy, lived-in home interior with soft natural window light',
     voiceEnglish: 'a warm, clear, natural voice with a standard American accent, upbeat and conversational',
-    voiceOther: (language) => `a warm, clear, natural voice with a native ${language} accent, upbeat and conversational`,
+    voiceOther: (language) =>
+      `a warm, clear, natural voice with a native ${language} accent, upbeat and conversational`,
     audio: 'clean close-mic speech with quiet natural room tone',
     camera: "handheld selfie at arm's length, eye level, natural light, subtle natural hand movement",
     action1: 'talks straight to the camera with natural expressions and small hand gestures',
@@ -45,7 +46,8 @@ export const STYLE_DEFAULTS: Record<VideoStyle, StyleDefaults> = {
     character: 'a knowledgeable science presenter with a calm, clear and trustworthy manner, neat professional look',
     setting: 'a clean, bright modern lab with soft even lighting and a simple uncluttered background',
     voiceEnglish: 'a calm, clear, confident voice with a standard American accent, measured and authoritative',
-    voiceOther: (language) => `a calm, clear, confident voice with a native ${language} accent, measured and authoritative`,
+    voiceOther: (language) =>
+      `a calm, clear, confident voice with a native ${language} accent, measured and authoritative`,
     audio: 'crisp, clean studio speech with quiet room tone',
     camera: 'steady medium close-up at eye level, presenter centered and facing the camera',
     action1: 'explains to the camera with calm, open hand gestures',
@@ -179,7 +181,9 @@ export function buildPart2Prompt(plan: ScriptPlan, settings: GenerationSettings)
     `Same ${noun}, same outfit, same location and lighting, same voice.`,
   ];
   if (settings.reinforceCharacterOnExtend) {
-    lines.push(`The ${noun} is the same person shown in <IMAGE_REF_0>; keep the face, hair and outfit exactly as in <IMAGE_REF_0>.`);
+    lines.push(
+      `The ${noun} is the same person shown in <IMAGE_REF_0>; keep the face, hair and outfit exactly as in <IMAGE_REF_0>.`,
+    );
   }
   lines.push(
     `Character: the same ${noun}, ${descriptor(plan.character)}`,
@@ -196,7 +200,9 @@ export function buildPart2Prompt(plan: ScriptPlan, settings: GenerationSettings)
     lines.push(`[${tc(start)}-${tc(end)}s] ${action} ${subject} says: "${quoteSafe(seg.dialogue)}"`);
     lines.push(`[${tc(end)}-10s] ${subject} ${d.closing}.`);
   } else {
-    lines.push(`[0-10s] ${action} At the end the ${noun} ${d.closing.replace(/^finishes speaking and /, '')}. No dialogue.`);
+    lines.push(
+      `[0-10s] ${action} At the end the ${noun} ${d.closing.replace(/^finishes speaking and /, '')}. No dialogue.`,
+    );
   }
   lines.push(audioLine(plan, true), textLine(seg.onScreenText, style), extraLine(settings));
   return lines.filter((l): l is string => Boolean(l)).join('\n');

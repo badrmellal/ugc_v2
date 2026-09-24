@@ -49,7 +49,8 @@ const REGION_PATTERN = /location is not supported|not available in your (?:count
 
 const TIMEOUT_PATTERN = /timed? ?out|timeout|deadline exceeded|deadline_exceeded/i;
 
-const NETWORK_PATTERN = /fetch failed|network|socket hang up|connection (?:error|reset|refused|closed)|other side closed/i;
+const NETWORK_PATTERN =
+  /fetch failed|network|socket hang up|connection (?:error|reset|refused|closed)|other side closed/i;
 
 const GOOGLE_STATUS_PATTERN =
   /\b(INVALID_ARGUMENT|FAILED_PRECONDITION|OUT_OF_RANGE|UNAUTHENTICATED|PERMISSION_DENIED|NOT_FOUND|ABORTED|ALREADY_EXISTS|RESOURCE_EXHAUSTED|CANCELLED|DATA_LOSS|UNKNOWN|INTERNAL|NOT_IMPLEMENTED|UNAVAILABLE|DEADLINE_EXCEEDED)\b/;
@@ -224,7 +225,11 @@ export function classifyGeminiError(
     );
   }
   if ((status === null || status < 500) && status !== 429 && SAFETY_PATTERN.test(d.message)) {
-    return make('safety_blocked', `Gemini blocked this request for safety or policy reasons (${upstream}). ${SAFETY_HINT}`, false);
+    return make(
+      'safety_blocked',
+      `Gemini blocked this request for safety or policy reasons (${upstream}). ${SAFETY_HINT}`,
+      false,
+    );
   }
   if (status === 429 || d.statusText === 'RESOURCE_EXHAUSTED') {
     return make(
