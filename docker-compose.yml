@@ -5,8 +5,9 @@
 # and set STORAGE_DRIVER=s3 plus the S3_* variables (see README).
 
 x-app: &app
+  # No shared `image:` name: web and worker build in parallel, and Docker Desktop rejects two builds
+  # exporting the same tag ("already exists"). The second build is served from the cache.
   build: .
-  image: omni-ugc-studio:latest
   env_file: .env
   environment:
     DATABASE_URL: postgres://omni:omni@postgres:5432/omni_ugc
