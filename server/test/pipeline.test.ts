@@ -17,6 +17,7 @@ import {
 import { runMigrations } from '../src/db/migrate.js';
 import { createPool, type Db } from '../src/db/pool.js';
 import { GenerationRepository } from '../src/db/repository.js';
+import { CaptionRenderer } from '../src/captions/index.js';
 import { FfmpegMediaTools } from '../src/media/ffmpeg.js';
 import { GenerationPipeline, type JobContext } from '../src/pipeline/runner.js';
 import { LeaseLostError } from '../src/pipeline/errors.js';
@@ -444,6 +445,56 @@ describe('generation pipeline', () => {
     expect(g.lockedBy).toBe('w-other');
     expect(g.status).toBe('running');
     expect(g.part1InteractionId).toBeNull();
+  });
+
+  it('burns captions into the final video and keeps a clean copy', async () => {
+    const job = await createJob({ plan: makePlan() });
+    video.queue({ outputSeconds: 2 }, { outputSeconds: 4 });
+    const withCaptions = new GenerationPipeline({
+      config,
+      repo,
+      video,
+      planner: fakePlanner,
+      storage,
+      media,
+      logger,
+      workRoot: dir,
+      sleep: async () => undefined,
+      captions: new CaptionRenderer({ media, logger, pythonPath: null }),
+    });
+    await withCaptions.run(await claim(), ctx());
+    const g = (await repo.get(job.id))!;
+    expect(g.status).toBe('succeeded');
+    expect(g.finalCleanKey).toBe(generationKeys(job.id).finalClean);
+    expect(g.captionEngine).toBe('estimate');
+    const [captioned, clean] = await Promise.all([storage.stat(g.finalVideoKey!), storage.stat(g.finalCleanKey!)]);
+    expect(captioned!.size).toBeGreaterThan(0);
+    expect(clean!.size).toBeGreaterThan(0);
+    expect((await repo.listEvents(job.id)).map((e) => e.message).join('\n')).toContain('Captions added');
+  });
+
+  it('skips captions when the setting is off', async () => {
+    const job = await createJob({ plan: makePlan() });
+    await db.query(`UPDATE generations SET settings = settings || '{"captions": false}'::jsonb WHERE id = $1`, [
+      job.id,
+    ]);
+    video.queue({ outputSeconds: 2 }, { outputSeconds: 4 });
+    const withCaptions = new GenerationPipeline({
+      config,
+      repo,
+      video,
+      planner: fakePlanner,
+      storage,
+      media,
+      logger,
+      workRoot: dir,
+      sleep: async () => undefined,
+      captions: new CaptionRenderer({ media, logger, pythonPath: null }),
+    });
+    await withCaptions.run(await claim(), ctx());
+    const g = (await repo.get(job.id))!;
+    expect(g.status).toBe('succeeded');
+    expect(g.finalCleanKey).toBeNull();
   });
 
   it('worker claims queued jobs and runs them to completion', async () => {

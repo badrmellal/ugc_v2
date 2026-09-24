@@ -113,6 +113,8 @@ export interface GenerationSettings {
   extraDirections: string;
   /** Re-send the character image as a reference in the extension turn for stronger identity lock. */
   reinforceCharacterOnExtend: boolean;
+  /** Burn in word-by-word captions with the spoken word highlighted in yellow. */
+  captions: boolean;
 }
 
 export interface SegmentPlan {
@@ -197,6 +199,14 @@ export interface GenerationDTO {
   part1VideoUrl: string | null;
   videoUrl: string | null;
   downloadUrl: string | null;
+  /** The final video without burned-in captions (null when it has no captions). */
+  cleanVideoUrl: string | null;
+  cleanDownloadUrl: string | null;
+  /** Whether the final video has burned-in captions, and how their timing was found. */
+  hasCaptions: boolean;
+  captionTiming: 'aligned' | 'estimated' | null;
+  /** Captions can be added to (or redone on) the finished video. */
+  canAddCaptions: boolean;
   thumbnailUrl: string | null;
   durationSec: number | null;
   /** How the final file was produced: returned whole by the model, or stitched from both parts. */
@@ -318,6 +328,7 @@ export const DEFAULT_SETTINGS: GenerationSettings = {
   voiceHint: '',
   extraDirections: '',
   reinforceCharacterOnExtend: false,
+  captions: true,
 };
 
 export function isTerminalStatus(status: GenerationStatus): boolean {

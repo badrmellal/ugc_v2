@@ -40,6 +40,8 @@ const COLUMNS: Record<string, { column: string; json?: boolean }> = {
   part2Usage: { column: 'part2_usage', json: true },
   part2Attempts: { column: 'part2_attempts' },
   finalVideoKey: { column: 'final_video_key' },
+  finalCleanKey: { column: 'final_clean_key' },
+  captionEngine: { column: 'caption_engine' },
   thumbnailKey: { column: 'thumbnail_key' },
   durationSec: { column: 'duration_sec' },
   assembly: { column: 'assembly' },
@@ -83,7 +85,12 @@ export function mapGenerationRow(r: Row): GenerationRecord {
     completedAt: toDate(r.completed_at),
     title: r.title as string,
     script: r.script as string,
-    settings: { theme: 'general', ...(r.settings as Partial<GenerationSettings>) } as GenerationSettings,
+    // Rows saved before a setting existed get its old behaviour (no theme, no captions).
+    settings: {
+      theme: 'general',
+      captions: false,
+      ...(r.settings as Partial<GenerationSettings>),
+    } as GenerationSettings,
     plan: (r.plan as ScriptPlan | null) ?? null,
     characterImageKey: r.character_image_key as string,
     characterImageMime: r.character_image_mime as string,
@@ -102,6 +109,8 @@ export function mapGenerationRow(r: Row): GenerationRecord {
     part2Usage: (r.part2_usage as UsageInfo | null) ?? null,
     part2Attempts: toNum(r.part2_attempts) ?? 0,
     finalVideoKey: (r.final_video_key as string | null) ?? null,
+    finalCleanKey: (r.final_clean_key as string | null) ?? null,
+    captionEngine: (r.caption_engine as string | null) ?? null,
     thumbnailKey: (r.thumbnail_key as string | null) ?? null,
     durationSec: toNum(r.duration_sec),
     assembly: (r.assembly as GenerationRecord['assembly']) ?? null,
@@ -350,7 +359,7 @@ export class GenerationRepository {
     const { rows } = await this.db.query(
       `SELECT 1 FROM generations
         WHERE id <> $2 AND (character_image_key = $1 OR part1_video_key = $1 OR part2_video_key = $1
-                            OR final_video_key = $1 OR thumbnail_key = $1)
+                            OR final_video_key = $1 OR final_clean_key = $1 OR thumbnail_key = $1)
         LIMIT 1`,
       [key, excludeId],
     );

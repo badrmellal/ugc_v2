@@ -98,6 +98,21 @@ export function SettingsPanel({
         options={imageModeOptions}
         onChange={(imageMode) => onChange({ imageMode })}
       />
+      <label className="flex items-start gap-3 rounded-xl border border-line p-3 text-sm">
+        <input
+          type="checkbox"
+          checked={settings.captions ?? true}
+          onChange={(event) => onChange({ captions: event.target.checked })}
+          className="mt-0.5 size-4 shrink-0 accent-accent"
+        />
+        <span>
+          <span className="font-medium">Word-by-word captions</span>
+          <span className="block text-xs text-muted">
+            Bold captions burned into the video, with the word being spoken highlighted in yellow and timed to the
+            voice. A version without captions is kept too.
+          </span>
+        </span>
+      </label>
       <Collapsible
         summary="Advanced: language, voice and directions"
         defaultOpen={Boolean(issues.language || issues.voiceHint || issues.extraDirections)}

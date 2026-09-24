@@ -30,19 +30,25 @@ RUN npm ci --omit=dev --workspace server --include-workspace-root=false --no-aud
 # ---- runtime ---------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates tini \
+  && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates tini python3 python3-venv \
   && rm -rf /var/lib/apt/lists/*
+
+# Word-level caption timing (forced alignment against the known script, fully offline).
+RUN python3 -m venv /opt/captions \
+  && /opt/captions/bin/pip install --no-cache-dir pocketsphinx==5.1.1
 
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
     LOCAL_STORAGE_DIR=/data/storage \
-    WEB_DIST_DIR=/app/web/dist
+    WEB_DIST_DIR=/app/web/dist \
+    CAPTIONS_PYTHON=/opt/captions/bin/python
 
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/server/package.json ./server/package.json
 COPY --from=build /app/server/dist ./server/dist
+COPY --from=build /app/server/assets ./server/assets
 COPY --from=build /app/web/dist ./web/dist
 COPY package.json ./
 

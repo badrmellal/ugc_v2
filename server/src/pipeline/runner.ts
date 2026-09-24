@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import type { AppConfig } from '../config.js';
+import type { CaptionRenderer } from '../captions/index.js';
 import {
   VideoModelError,
   type GenerationPatch,
@@ -38,6 +39,8 @@ export interface PipelineDeps {
   storage: StorageDriver;
   media: MediaTools;
   logger: Logger;
+  /** Burns word-by-word captions into the final video (skipped when absent). */
+  captions?: Pick<CaptionRenderer, 'render'>;
   /** Cluster-wide cap on concurrent Omni turns. Defaults to unlimited. */
   turnLimiter?: TurnLimiter;
   /** Parent directory for per-job scratch space. Defaults to the OS temp dir. */
@@ -240,7 +243,11 @@ class JobRun {
     const finalProbe = await media.probe(finalLocal);
     const thumbLocal = join(this.workDir, 'thumbnail.jpg');
     await media.thumbnail(finalLocal, thumbLocal, Math.min(1.5, finalProbe.durationSec / 2));
-    const finalInfo = await storage.putFile(this.keys.final, finalLocal, 'video/mp4');
+
+    // Burned-in captions: the captioned file becomes the final video, the clean one is kept alongside.
+    const captioned = await this.addCaptions(finalLocal, p1.durationSec);
+    const finalInfo = await storage.putFile(this.keys.final, captioned?.path ?? finalLocal, 'video/mp4');
+    const cleanInfo = captioned ? await storage.putFile(this.keys.finalClean, finalLocal, 'video/mp4') : null;
     const thumbInfo = await storage.putFile(this.keys.thumbnail, thumbLocal, 'image/jpeg');
 
     const cost = await this.computeActualCost();
@@ -251,6 +258,8 @@ class JobRun {
       stageStartedAt: new Date(this.now()),
       completedAt: new Date(this.now()),
       finalVideoKey: finalInfo.key,
+      finalCleanKey: cleanInfo?.key ?? null,
+      captionEngine: captioned?.engine ?? null,
       thumbnailKey: thumbInfo.key,
       durationSec: Math.round(finalProbe.durationSec * 100) / 100,
       assembly,
@@ -266,6 +275,35 @@ class JobRun {
     );
     if (Math.abs(finalProbe.durationSec - 2 * SEGMENT_SECONDS) > 3) {
       await this.event('warn', `Final duration is ${finalProbe.durationSec.toFixed(1)}s instead of about 20s`);
+    }
+  }
+
+  /** Captions when enabled; any failure leaves the video uncaptioned rather than failing the job. */
+  private async addCaptions(
+    finalLocal: string,
+    part1DurationSec: number,
+  ): Promise<{ path: string; engine: string } | null> {
+    const { captions } = this.deps;
+    const plan = this.g.plan;
+    if (!this.g.settings.captions || !captions || !plan) return null;
+    const output = join(this.workDir, 'final-captioned.mp4');
+    try {
+      const result = await captions.render({
+        input: finalLocal,
+        output,
+        parts: plan.segments.map((s) => s.dialogue),
+        part1DurationSec,
+        workDir: this.workDir,
+      });
+      await this.event(
+        'info',
+        `Captions added (${result.words.length} words, ${result.engine === 'pocketsphinx' ? 'timed to the voice' : 'estimated timing'})`,
+      );
+      return { path: output, engine: result.engine };
+    } catch (err) {
+      this.log.warn({ err: this.safeErr(err) }, 'captions failed');
+      await this.event('warn', 'Captions could not be added, the video is delivered without them');
+      return null;
     }
   }
 

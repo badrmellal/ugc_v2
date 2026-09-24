@@ -1071,10 +1071,11 @@ describe('GET /api/generations', () => {
       status: 'succeeded',
       progress: 100,
       etaSeconds: null,
-      videoUrl: `/api/generations/${dto.id}/video`,
-      downloadUrl: `/api/generations/${dto.id}/video?download=1`,
+      // Final media URLs carry a version so a re-rendered file (e.g. captions added) is never served from cache.
+      videoUrl: expect.stringMatching(new RegExp(`^/api/generations/${dto.id}/video\\?v=\\d+$`)),
+      downloadUrl: expect.stringMatching(new RegExp(`^/api/generations/${dto.id}/video\\?v=\\d+&download=1$`)),
       part1VideoUrl: `/api/generations/${dto.id}/part1`,
-      thumbnailUrl: `/api/generations/${dto.id}/thumbnail`,
+      thumbnailUrl: expect.stringMatching(new RegExp(`^/api/generations/${dto.id}/thumbnail\\?v=\\d+$`)),
       canRegeneratePart2: true,
       canCancel: false,
     });

@@ -52,6 +52,7 @@ Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "st
   - `mode: "full"`: new part 1 and part 2. Optional `script`, `settings`, `plan` edits.
   - `mode: "part2"`: reuses the source's part 1 interaction and video, re-runs only the extension. Requires the source to have a completed part 1 (`canRegeneratePart2`). Optional `part2` edits.
 - `POST /api/generations/:id/cancel` → `GenerationDTO`. Queued jobs are canceled immediately; running jobs stop at the next checkpoint (the in-flight Google interaction is canceled best effort). `409 conflict` if already terminal.
+- `POST /api/generations/:id/captions` → `GenerationDTO`. Burns word-by-word captions into a finished video (or redoes them), keeping the uncaptioned copy. Works on videos made before captions existed. `409 conflict` unless the generation succeeded; `503 media_unavailable` when ffmpeg is missing.
 - `DELETE /api/generations/:id` → `204`. Deletes stored files not shared with other generations. `409 conflict` while running (cancel first).
 
 ## Media
@@ -59,11 +60,12 @@ Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "st
 All media endpoints support `HEAD`, `Range` requests (`206 Partial Content`), `ETag`, and `Cache-Control: private`. With S3 and `S3_PRESIGNED_URLS=true` they respond `302` to a short-lived presigned URL instead.
 
 - `GET /api/generations/:id/video` → final 20s MP4. `?download=1` adds `Content-Disposition: attachment; filename="<slug>-<id8>.mp4"`.
+- `GET /api/generations/:id/clean` → the final MP4 without burned-in captions (only when captions were added). `?download=1` names it `<slug>-<id8>-no-captions.mp4`.
 - `GET /api/generations/:id/part1` → part 1 MP4 (available as soon as part 1 finishes).
 - `GET /api/generations/:id/thumbnail` → JPEG poster.
 - `GET /api/generations/:id/character` → the normalized character image.
 
-The DTO fields `videoUrl`, `downloadUrl`, `part1VideoUrl`, `thumbnailUrl`, `characterImageUrl` point at these endpoints (relative URLs), or are `null` when the file does not exist yet.
+The DTO fields `videoUrl`, `downloadUrl`, `cleanVideoUrl`, `cleanDownloadUrl`, `part1VideoUrl`, `thumbnailUrl`, `characterImageUrl` point at these endpoints (relative URLs), or are `null` when the file does not exist yet. Final video URLs carry a `?v=` version so browsers refetch after captions change. `hasCaptions`, `captionTiming` (`aligned` when timed to the voice, `estimated` otherwise) and `canAddCaptions` describe the caption state.
 
 ## Health
 

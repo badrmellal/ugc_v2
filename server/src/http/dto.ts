@@ -24,13 +24,21 @@ export interface DtoOptions {
   part1CreatedAt?: Date | null;
 }
 
-export function mediaUrls(id: string) {
+export function mediaUrls(id: string, version?: Date) {
   const base = `/api/generations/${id}`;
+  // The final file can be replaced in place (captions added later): the version busts browser caches.
+  const v = version ? `v=${version.getTime()}` : '';
+  const q = (extra?: string) => {
+    const parts = [v, extra].filter(Boolean);
+    return parts.length ? `?${parts.join('&')}` : '';
+  };
   return {
-    video: `${base}/video`,
-    download: `${base}/video?download=1`,
+    video: `${base}/video${q()}`,
+    download: `${base}/video${q('download=1')}`,
+    clean: `${base}/clean${q()}`,
+    cleanDownload: `${base}/clean${q('download=1')}`,
     part1: `${base}/part1`,
-    thumbnail: `${base}/thumbnail`,
+    thumbnail: `${base}/thumbnail${q()}`,
     character: `${base}/character`,
   };
 }
@@ -80,7 +88,7 @@ export function toGenerationDTO(
 ): GenerationDTO {
   const nowMs = typeof now === 'number' ? now : now.getTime();
   const timings: StageTimings = { turnSeconds: opts.turnSeconds ?? REAL_TURN_SECONDS };
-  const urls = mediaUrls(g.id);
+  const urls = mediaUrls(g.id, g.updatedAt);
   return {
     id: g.id,
     createdAt: g.createdAt.toISOString(),
@@ -99,6 +107,11 @@ export function toGenerationDTO(
     part1VideoUrl: g.part1VideoKey ? urls.part1 : null,
     videoUrl: g.finalVideoKey ? urls.video : null,
     downloadUrl: g.finalVideoKey ? urls.download : null,
+    cleanVideoUrl: g.finalCleanKey ? urls.clean : null,
+    cleanDownloadUrl: g.finalCleanKey ? urls.cleanDownload : null,
+    hasCaptions: Boolean(g.finalCleanKey),
+    captionTiming: g.finalCleanKey ? (g.captionEngine === 'pocketsphinx' ? 'aligned' : 'estimated') : null,
+    canAddCaptions: g.status === 'succeeded' && Boolean(g.finalVideoKey) && Boolean(g.plan),
     thumbnailUrl: g.thumbnailKey ? urls.thumbnail : null,
     durationSec: g.durationSec,
     assembly: g.assembly,
@@ -129,7 +142,7 @@ export function failedStage(g: GenerationRecord, events: GenerationEvent[]): Gen
 }
 
 export function toListItem(g: GenerationRecord): GenerationListItem {
-  const urls = mediaUrls(g.id);
+  const urls = mediaUrls(g.id, g.updatedAt);
   return {
     id: g.id,
     createdAt: g.createdAt.toISOString(),

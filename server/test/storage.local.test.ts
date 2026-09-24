@@ -244,6 +244,7 @@ describe('storage keys', () => {
       part1: `generations/${ID}/part1.mp4`,
       part2: `generations/${ID}/part2.mp4`,
       final: `generations/${ID}/final.mp4`,
+      finalClean: `generations/${ID}/final-clean.mp4`,
       thumbnail: `generations/${ID}/thumbnail.jpg`,
       prefix: `generations/${ID}/`,
     });

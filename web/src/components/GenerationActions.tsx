@@ -1,9 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Ban, Download, RefreshCw, Scissors, SquarePen, Trash2 } from 'lucide-react';
+import { Ban, Captions, Download, RefreshCw, Scissors, SquarePen, Trash2 } from 'lucide-react';
 import { useId, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { isTerminalStatus, type GenerationDTO, type RegenerateRequest } from '@shared/api';
-import { cancelGeneration, deleteGeneration, regenerateGeneration } from '../lib/api';
+import { addCaptions, cancelGeneration, deleteGeneration, regenerateGeneration } from '../lib/api';
 import { preventImplicitSubmit } from '../lib/forms';
 import { invalidateAfterGenerationChange, queryKeys } from '../lib/hooks';
 import { diffSegmentEdits, SEGMENT_FIELDS, type SegmentEdits } from '../lib/plan';
@@ -50,6 +50,21 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
     mutationFn: (part2: RegenerateRequest['part2']) =>
       regenerateGeneration(g.id, part2 && Object.keys(part2).length > 0 ? { mode: 'part2', part2 } : { mode: 'part2' }),
     onSuccess: (dto) => openNewGeneration(dto, 'Part 2 regeneration queued'),
+  });
+
+  const captions = useMutation({
+    mutationFn: () => addCaptions(g.id),
+    onSuccess: (dto) => {
+      queryClient.setQueryData(queryKeys.generation(dto.id), dto);
+      invalidateAfterGenerationChange(queryClient);
+      toast.push({ tone: 'success', title: dto.hasCaptions ? 'Captions added' : 'Done' });
+    },
+    onError: (err) =>
+      toast.push({
+        tone: 'error',
+        title: 'Could not add captions',
+        description: err instanceof Error ? err.message : undefined,
+      }),
   });
 
   const cancel = useMutation({
@@ -104,6 +119,15 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
           Download MP4
         </Button>
       )}
+      {g.cleanDownloadUrl && (
+        <a
+          href={g.cleanDownloadUrl}
+          download
+          className="block text-center text-sm font-medium text-accent-text underline-offset-2 hover:underline"
+        >
+          Download without captions
+        </a>
+      )}
 
       <div className="grid gap-2">
         <Button
@@ -114,6 +138,16 @@ export function GenerationActions({ generation: g }: { generation: GenerationDTO
         >
           Regenerate
         </Button>
+        {g.canAddCaptions && (
+          <Button
+            onClick={() => captions.mutate()}
+            loading={captions.isPending}
+            disabled={captions.isPending}
+            icon={<Captions className="size-4" aria-hidden="true" />}
+          >
+            {g.hasCaptions ? 'Redo captions' : 'Add captions'}
+          </Button>
+        )}
         <Button
           onClick={() => setDialog('part2')}
           disabled={part2Unavailable !== undefined}

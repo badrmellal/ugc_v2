@@ -196,7 +196,8 @@ describe('DefaultScriptPlanner.finalize and prompts', () => {
     expect(plan.segments[0].prompt).toContain('[8-10s]');
     expect(plan.segments[1].prompt).toContain('[0-0.8s]');
     expect(plan.segments[1].prompt).toContain('[0.8-8.5s]');
-    expect(plan.segments[0].prompt).toContain('No text overlay on screen.');
+    // Captions are burned in afterwards (default on), so the model is told to draw no text of its own.
+    expect(plan.segments[0].prompt).toContain('No text or subtitles on screen.');
     expect(plan.segments[0].prompt).toContain('No background music.');
     expect(plan.segments[0].prompt.length).toBeLessThan(1300);
     expect(plan.segments[1].prompt.length).toBeLessThan(1300);

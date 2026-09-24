@@ -272,6 +272,8 @@ describe('DTO mapping', () => {
     part2Usage: null,
     part2Attempts: 0,
     finalVideoKey: null,
+    finalCleanKey: null,
+    captionEngine: null,
     thumbnailKey: null,
     durationSec: null,
     assembly: null,
@@ -326,8 +328,8 @@ describe('DTO mapping', () => {
       progress: 100,
       etaSeconds: null,
       canCancel: false,
-      videoUrl: `/api/generations/${base.id}/video`,
-      downloadUrl: `/api/generations/${base.id}/video?download=1`,
+      videoUrl: `/api/generations/${base.id}/video?v=${done.updatedAt.getTime()}`,
+      downloadUrl: `/api/generations/${base.id}/video?v=${done.updatedAt.getTime()}&download=1`,
     });
     expect(toListItem(done)).toMatchObject({ id: base.id, estimatedCostUsd: 3.2, thumbnailUrl: null });
   });

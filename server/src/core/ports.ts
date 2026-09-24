@@ -235,6 +235,10 @@ export interface GenerationRecord {
   part2Usage: UsageInfo | null;
   part2Attempts: number;
   finalVideoKey: string | null;
+  /** The final video without captions, set when captions were burned into `finalVideoKey`. */
+  finalCleanKey: string | null;
+  /** How caption timing was found ('pocketsphinx' or 'estimate'); null without captions. */
+  captionEngine: string | null;
   thumbnailKey: string | null;
   durationSec: number | null;
   assembly: 'model_full' | 'concatenated' | null;

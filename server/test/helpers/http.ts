@@ -66,9 +66,10 @@ export async function createHarness(
     planner,
     // The API never runs jobs itself; it only needs the worker (null here) to be notified.
     pipeline: {} as GenerationPipeline,
+    captions: null,
     worker: null,
     ...overrides,
-  };
+  } as AppContext;
   const app = buildApp(ctx);
   await app.ready();
   return { app, ctx, storage, planner, media, close: () => app.close() };

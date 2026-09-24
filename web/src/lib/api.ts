@@ -243,6 +243,10 @@ export function regenerateGeneration(id: string, body: RegenerateRequest): Promi
   return request<GenerationDTO>(`${generationPath(id)}/regenerate`, { method: 'POST', json: body });
 }
 
+export function addCaptions(id: string): Promise<GenerationDTO> {
+  return request<GenerationDTO>(`${generationPath(id)}/captions`, { method: 'POST' });
+}
+
 export function cancelGeneration(id: string): Promise<GenerationDTO> {
   return request<GenerationDTO>(`${generationPath(id)}/cancel`, { method: 'POST' });
 }

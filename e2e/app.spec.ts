@@ -69,6 +69,17 @@ test('generates, previews, downloads and regenerates a 20s video', async ({ page
   expect(dto.plan.segments[1].prompt).toContain('Extend this video');
   expect(dto.settings.theme).toBe('bandys_cars');
   expect(dto.plan.setting).toContain('Bandys Cars');
+  // Captions are on by default: the final video is captioned and a clean copy is kept.
+  expect(dto.hasCaptions).toBe(true);
+  expect(dto.cleanDownloadUrl).toBeTruthy();
+  const clean = await page.request.get(dto.cleanDownloadUrl);
+  expect(clean.status()).toBe(200);
+  expect(clean.headers()['content-disposition']).toContain('attachment');
+  await expect(page.getByRole('link', { name: 'Download without captions' })).toBeVisible();
+
+  // Captions can be redone on a finished video.
+  await page.getByRole('button', { name: 'Redo captions' }).click();
+  await expect(page.getByText('Captions added').first()).toBeVisible();
 
   // Preview player shows the final video. Open-source Chromium builds cannot decode H.264/AAC
   // (Chrome, Safari, Edge and Firefox can); there the player must say so instead of failing silently.

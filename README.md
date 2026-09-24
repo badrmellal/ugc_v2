@@ -11,6 +11,7 @@ Omni produces at most 10 seconds per request. This app generates the first 10 se
 - **Character image per video.** Upload the character for each video and bind it as an identity reference (`<IMAGE_REF_0>`, default) or as the literal first frame (`<FIRST_FRAME>`). Images are sniffed, re-encoded and stripped of metadata before upload.
 - **UGC and Scientific styles**, 360p / 720p / 1080p / 4k, language and voice direction, optional split review and editing before you spend anything.
 - **Live progress**: stage stepper (split, upload, part 1, extension, finalize), percent and ETA, event log, and a part 1 preview as soon as the first 10 seconds exist.
+- **Word-by-word captions** burned into the video (on by default): bold white uppercase words in short groups, with the word being spoken highlighted in yellow. Timing comes from forced alignment of your script against the generated voice, so the words are always spelled right and land on the beat.
 - **Preview and download** in a phone-frame player with HTTP Range streaming (or presigned URLs from your bucket).
 - **Regeneration**: full regeneration, "edit and regenerate", or **regenerate part 2 only** (keeps part 1 and re-runs only the extension, at roughly half the cost).
 - **History** of every generation with thumbnails, status, duration and cost.
@@ -27,7 +28,8 @@ Browser (React)  ──>  API (Fastify)  ──>  Postgres (jobs, history, ledge
                                                         ├─ split script  (Gemini text model)
                                                         ├─ part 1: 0-10s  (Omni, character image, 9:16)
                                                         ├─ part 2: 10-20s (Omni, previous_interaction_id)
-                                                        └─ verify + faststart + thumbnail (ffmpeg)
+                                                        ├─ verify + faststart + thumbnail (ffmpeg)
+                                                        └─ captions: align script to voice, burn in (ffmpeg/libass)
 ```
 
 Each generation is both a history record and a job. Workers claim jobs with `FOR UPDATE SKIP LOCKED`, renew a lease with a heartbeat, and checkpoint every step (plan, uploaded image, interaction ids, stored videos). Gemini turns run in background mode and are polled, so a crash or deploy never loses a paid generation. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/API.md](docs/API.md).
@@ -51,7 +53,7 @@ Then for each video:
 1. Pick a **Style** (UGC selfie or Scientific explainer) and a **Theme** (General, Bandys Cars, or Technology, AI & Robotics).
 2. Paste your 20-second script (about 40 spoken words) and drop in the character image.
 3. Optionally click **Preview split** to review or edit the two 10-second parts, then **Generate 20s video**.
-4. Watch the progress, preview the result, download the MP4, or regenerate the whole video or only part 2.
+4. Watch the progress, preview the result (captioned with the spoken word in yellow), download the MP4 with or without captions, or regenerate the whole video or only part 2.
 
 Useful commands: `docker compose logs -f worker` (generation logs), `docker compose down` (stop), `docker compose down -v` (stop and delete all videos and history). The app only listens on localhost, so other devices on your network cannot use your API key. Want to try it without spending anything? Set `GEMINI_MOCK=true` in `.env`: videos are then synthesized locally and Google is never called.
 
@@ -67,9 +69,24 @@ Themes are independent of the style and control the location, the on-camera role
 
 A themed video always uses the theme's location unless you edit it in **Preview split**. To change a theme's wording, edit `server/src/script/themes.ts`.
 
+## Captions
+
+Captions are on by default (**Word-by-word captions** in the settings). After the 20-second video is ready, the worker:
+
+1. takes the spoken lines from your script (stage directions removed), so nothing is ever mis-transcribed,
+2. aligns each word to the generated voice with PocketSphinx (offline, no extra API calls or cost),
+3. burns the captions in with ffmpeg: Poppins ExtraBold, 1 to 3 words at a time, breaking at punctuation, with the active word in yellow (`#FFD400`) and slightly enlarged. They sit above the bottom area that TikTok, Reels and Shorts cover with their buttons.
+
+If alignment is not possible (no Python/PocketSphinx, or mock mode), timing is estimated from the speech windows and the generation page says so. With captions on, Omni is asked not to draw its own subtitles, and any on-screen text you request is placed near the top of the frame.
+
+- **Download without captions** is always available next to the normal download.
+- **Add captions** / **Redo captions** on the generation page captions an existing video (including ones made before this feature) without calling Gemini again.
+- The Docker image ships with everything needed. For local development without Docker, install PocketSphinx once: `python3 -m pip install pocketsphinx==5.1.1`, and set `CAPTIONS_PYTHON` if that Python is not `python3`.
+- Style constants (font, colour, words per group, position) live in `server/src/captions/ass.ts`.
+
 ## Local development
 
-Requirements: Node.js 22.12+, PostgreSQL 14+, ffmpeg/ffprobe on `PATH`.
+Requirements: Node.js 22.12+, PostgreSQL 14+, ffmpeg/ffprobe on `PATH` (with libass, which standard builds include), and optionally Python 3 with `pocketsphinx` for exact caption timing.
 
 ```bash
 npm install
@@ -107,6 +124,7 @@ All settings are environment variables; see [.env.example](.env.example) for the
 | `ROLE`                              | `all`                   | `web`, `worker` or `all`.                                                                         |
 | `WORKER_CONCURRENCY`                | `2`                     | Jobs per worker process.                                                                          |
 | `DAILY_BUDGET_USD`                  | unlimited               | Blocks new jobs when today's spend plus in-flight estimates would exceed it.                      |
+| `CAPTIONS_PYTHON`                   | `python3`               | Python with `pocketsphinx` for caption alignment. Empty disables alignment (estimated timing).    |
 | `PRICE_*`, `VIDEO_TOKENS_PER_SEC_*` | Google list prices      | Update if pricing changes.                                                                        |
 
 ## Costs

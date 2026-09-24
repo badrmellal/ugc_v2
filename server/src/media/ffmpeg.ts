@@ -661,6 +661,72 @@ export class FfmpegMediaTools implements MediaTools {
   }
 
   /** Runs `produce(tmp)` for a temp file next to `output`, then renames it into place. */
+  /** Mono 16 kHz signed 16-bit PCM of the first audio stream (input for the caption aligner). */
+  async extractPcm(input: string, output: string): Promise<void> {
+    await assertInputFile(input);
+    const src = path.resolve(input);
+    await this.writeOutput(output, async (tmp) => {
+      await this.ffmpeg([
+        ...INPUT_GUARD,
+        '-i',
+        src,
+        '-map',
+        '0:a:0',
+        '-vn',
+        '-ac',
+        '1',
+        '-ar',
+        '16000',
+        '-f',
+        's16le',
+        tmp,
+      ]);
+    });
+  }
+
+  /**
+   * Burns an ASS subtitle file into the video (video re-encoded, audio copied). The subtitle file and
+   * the fonts directory are passed relative to `cwd` so no path ever needs filtergraph escaping.
+   */
+  async burnSubtitles(
+    input: string,
+    output: string,
+    opts: { cwd: string; assFile: string; fontsDir: string },
+  ): Promise<void> {
+    await assertInputFile(input);
+    if (!FILTER_SAFE_PATH.test(opts.assFile) || !FILTER_SAFE_PATH.test(opts.fontsDir)) {
+      throw new MediaError('invalid_argument', 'subtitle and font paths must be simple relative names');
+    }
+    const src = path.resolve(input);
+    await this.writeOutput(output, async (tmp) => {
+      await this.ffmpeg(
+        [
+          ...INPUT_GUARD,
+          '-i',
+          src,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a:0?',
+          '-vf',
+          `ass=${opts.assFile}:fontsdir=${opts.fontsDir}`,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'medium',
+          '-crf',
+          '18',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'copy',
+          ...mp4Out(tmp),
+        ],
+        { cwd: opts.cwd },
+      );
+    });
+  }
+
   private async writeOutput(output: string, produce: (tmp: string) => Promise<unknown>): Promise<void> {
     const dest = path.resolve(output);
     const dir = path.dirname(dest);

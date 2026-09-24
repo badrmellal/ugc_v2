@@ -118,4 +118,11 @@ CREATE TABLE IF NOT EXISTS app_state (
 );
 `,
   },
+  {
+    id: '003_captions',
+    sql: `
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS final_clean_key text;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS caption_engine text;
+`,
+  },
 ];

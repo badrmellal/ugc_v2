@@ -99,6 +99,8 @@ export interface GenerationKeys {
   part1: string;
   part2: string;
   final: string;
+  /** The final video without burned-in captions (kept when captions are added). */
+  finalClean: string;
   thumbnail: string;
   /** Prefix holding every object of the generation (for `deletePrefix`). */
   prefix: string;
@@ -115,6 +117,7 @@ export function generationKeys(id: string): GenerationKeys {
     part1: `${base}/part1.mp4`,
     part2: `${base}/part2.mp4`,
     final: `${base}/final.mp4`,
+    finalClean: `${base}/final-clean.mp4`,
     thumbnail: `${base}/thumbnail.jpg`,
     prefix: `${base}/`,
   };

@@ -104,10 +104,14 @@ function audioLine(plan: ScriptPlan, continuing: boolean): string {
   return parts.join(' ');
 }
 
-function textLine(onScreenText: string, style: VideoStyle): string {
-  if (!onScreenText) return 'No text overlay on screen.';
-  const where = style === 'scientific' ? 'a clean, simple label' : 'a simple, clean caption';
-  return `On-screen text: ${where} reading "${quoteSafe(onScreenText)}" in the lower third, no other text on screen.`;
+function textLine(onScreenText: string, settings: GenerationSettings): string {
+  // Burned-in captions are added afterwards in the lower middle: keep the model's own text away from them.
+  if (!onScreenText) {
+    return settings.captions ? 'No text or subtitles on screen.' : 'No text overlay on screen.';
+  }
+  const what = settings.style === 'scientific' ? 'a clean, simple label' : 'a simple, clean caption';
+  const where = settings.captions ? 'near the top of the frame' : 'in the lower third';
+  return `On-screen text: ${what} reading "${quoteSafe(onScreenText)}" ${where}, no other text on screen.`;
 }
 
 function languageLine(language: string, subject: string): string | null {
@@ -209,7 +213,7 @@ export function buildPart1Prompt(plan: ScriptPlan, settings: GenerationSettings)
     const action = actionSentence(subject, seg.action || d.silentAction);
     lines.push(`[0-10s] ${action} No dialogue.`);
   }
-  lines.push(audioLine(plan, false), textLine(seg.onScreenText, style), extraLine(settings));
+  lines.push(audioLine(plan, false), textLine(seg.onScreenText, settings), extraLine(settings));
   return lines.filter((l): l is string => Boolean(l)).join('\n');
 }
 
@@ -253,6 +257,6 @@ export function buildPart2Prompt(plan: ScriptPlan, settings: GenerationSettings)
       `[0-10s] ${action} At the end the ${noun} ${d.closing.replace(/^finishes speaking and /, '')}. No dialogue.`,
     );
   }
-  lines.push(audioLine(plan, true), textLine(seg.onScreenText, style), extraLine(settings));
+  lines.push(audioLine(plan, true), textLine(seg.onScreenText, settings), extraLine(settings));
   return lines.filter((l): l is string => Boolean(l)).join('\n');
 }

@@ -8,13 +8,18 @@ import { isUuid } from '../schemas.js';
 import type { RouteDeps } from './types.js';
 
 interface MediaKind {
-  field: 'finalVideoKey' | 'part1VideoKey' | 'thumbnailKey' | 'characterImageKey';
+  field: 'finalVideoKey' | 'finalCleanKey' | 'part1VideoKey' | 'thumbnailKey' | 'characterImageKey';
   contentType: string;
   missing: string;
 }
 
 const MEDIA: Record<string, MediaKind> = {
   video: { field: 'finalVideoKey', contentType: 'video/mp4', missing: 'The final video is not ready yet.' },
+  clean: {
+    field: 'finalCleanKey',
+    contentType: 'video/mp4',
+    missing: 'This video has no captions, so there is no separate version without them.',
+  },
   part1: { field: 'part1VideoKey', contentType: 'video/mp4', missing: 'Part 1 (0-10s) is not ready yet.' },
   thumbnail: { field: 'thumbnailKey', contentType: 'image/jpeg', missing: 'The thumbnail is not ready yet.' },
   character: { field: 'characterImageKey', contentType: 'image/jpeg', missing: 'The character image is missing.' },
@@ -43,8 +48,14 @@ export function registerMediaRoutes(app: FastifyInstance, deps: RouteDeps): void
     const key = g[kind.field];
     if (!key) throw notFound(kind.missing);
 
+    const downloadable = kind.field === 'finalVideoKey' || kind.field === 'finalCleanKey';
     const fileName =
-      kind.field === 'finalVideoKey' && wantsDownload(req.query) ? downloadFileName(g.title, g.id) : null;
+      downloadable && wantsDownload(req.query)
+        ? downloadFileName(g.title, g.id).replace(
+            /\.mp4$/,
+            kind.field === 'finalCleanKey' ? '-no-captions.mp4' : '.mp4',
+          )
+        : null;
     if (fileName) reply.header('content-disposition', `attachment; filename="${fileName}"`);
 
     const signedUrl = await ctx.storage.getSignedUrl(key, {

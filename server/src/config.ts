@@ -140,6 +140,8 @@ const EnvSchema = z.object({
   WEB_DIST_DIR: z.string().optional(),
 
   // --- Media processing ---
+  /** Python with pocketsphinx for exact caption timing. Empty disables it (timing is then estimated). */
+  CAPTIONS_PYTHON: z.string().default('python3'),
   FFMPEG_PATH: z.string().default('ffmpeg'),
   FFPROBE_PATH: z.string().default('ffprobe'),
   /** Max seconds for a single ffmpeg/ffprobe run (4K concat on a small CPU can be slow). */
@@ -209,7 +211,7 @@ export interface AppConfig {
     turnTextOutputTokens: number;
   };
   webDistDir: string | null;
-  media: { ffmpegPath: string; ffprobePath: string; timeoutMs: number };
+  media: { ffmpegPath: string; ffprobePath: string; timeoutMs: number; captionsPython: string | null };
 }
 
 export class ConfigError extends Error {
@@ -357,6 +359,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       ffmpegPath: e.FFMPEG_PATH,
       ffprobePath: e.FFPROBE_PATH,
       timeoutMs: positive('MEDIA_TIMEOUT_SEC', e.MEDIA_TIMEOUT_SEC) * 1000,
+      captionsPython: e.CAPTIONS_PYTHON.trim() || null,
     },
   };
 }

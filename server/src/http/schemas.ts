@@ -74,6 +74,7 @@ const settingsFields = {
   voiceHint: text(LIMITS.voiceHintMaxChars),
   extraDirections: text(LIMITS.extraDirectionsMaxChars),
   reinforceCharacterOnExtend: z.boolean(),
+  captions: z.boolean(),
 };
 
 /** Full settings; omitted fields fall back to DEFAULT_SETTINGS (convenient for API clients). */
@@ -89,6 +90,7 @@ export const settingsSchema = z
     reinforceCharacterOnExtend: settingsFields.reinforceCharacterOnExtend.default(
       DEFAULT_SETTINGS.reinforceCharacterOnExtend,
     ),
+    captions: settingsFields.captions.default(DEFAULT_SETTINGS.captions),
   })
   .default({ ...DEFAULT_SETTINGS }) satisfies z.ZodType<GenerationSettings, unknown>;
 
@@ -102,6 +104,7 @@ export const settingsPatchSchema = z.object({
   voiceHint: settingsFields.voiceHint.optional(),
   extraDirections: settingsFields.extraDirections.optional(),
   reinforceCharacterOnExtend: settingsFields.reinforceCharacterOnExtend.optional(),
+  captions: settingsFields.captions.optional(),
 });
 
 const segmentSchema = <I extends 1 | 2>(index: I) =>

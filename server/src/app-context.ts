@@ -5,6 +5,7 @@ import { createPool, type Db } from './db/pool.js';
 import { GenerationRepository } from './db/repository.js';
 import { createTextClient, createVideoClient } from './gemini/index.js';
 import { createLogger } from './logger.js';
+import { CaptionRenderer } from './captions/index.js';
 import { createMediaTools } from './media/ffmpeg.js';
 import { createTransportStore } from './db/transport-store.js';
 import { PgTurnLimiter } from './db/turn-limiter.js';
@@ -25,6 +26,8 @@ export interface AppContext {
   text: TextModelClient;
   planner: ScriptPlanner;
   pipeline: GenerationPipeline;
+  /** Burns captions into videos (pipeline and the "add captions" action). Null when media is overridden by a fake. */
+  captions: CaptionRenderer | null;
   /** Present only when this process runs jobs (`ROLE=all` or `ROLE=worker`). */
   worker: Worker | null;
 }
@@ -50,7 +53,19 @@ export function createAppContext(config: AppConfig, overrides: Partial<AppContex
   const db = overrides.db ?? createPool(config);
   const repo = overrides.repo ?? new GenerationRepository(db);
   const storage = overrides.storage ?? createStorage(config);
-  const media = overrides.media ?? createMediaTools(config);
+  const ffmpegTools = overrides.media ? null : createMediaTools(config);
+  const media = overrides.media ?? ffmpegTools!;
+  const captions =
+    'captions' in overrides
+      ? (overrides.captions ?? null)
+      : ffmpegTools
+        ? new CaptionRenderer({
+            media: ffmpegTools,
+            logger,
+            // Mock clips carry a tone, not speech: estimate the timing instead of aligning.
+            pythonPath: config.gemini.mock ? null : config.media.captionsPython,
+          })
+        : null;
   const video = overrides.video ?? createVideoClient(config, logger, media, createTransportStore(repo, logger));
   const text = overrides.text ?? createTextClient(config, logger);
   const planner = overrides.planner ?? createPlanner(config, text, logger);
@@ -64,6 +79,7 @@ export function createAppContext(config: AppConfig, overrides: Partial<AppContex
       storage,
       media,
       logger,
+      captions: captions ?? undefined,
       // Cluster-wide cap on concurrent Omni turns (parallel streams on one key are reported to be cut).
       turnLimiter: new PgTurnLimiter(db, config.gemini.maxConcurrentTurns),
     });
@@ -85,7 +101,7 @@ export function createAppContext(config: AppConfig, overrides: Partial<AppContex
     worker = null;
   }
 
-  return { config, logger, db, repo, storage, media, video, text, planner, pipeline, worker };
+  return { config, logger, db, repo, storage, media, video, text, planner, pipeline, captions, worker };
 }
 
 const closed = new WeakSet<AppContext>();

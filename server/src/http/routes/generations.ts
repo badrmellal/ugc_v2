@@ -326,6 +326,58 @@ export function registerGenerationRoutes(app: FastifyInstance, deps: RouteDeps):
   // Cancel / delete
   // ---------------------------------------------------------------------------
 
+  /** Burns captions into a finished video (or redoes them from the clean copy). */
+  app.post<IdParams>(
+    '/api/generations/:id/captions',
+    { onRequest: deps.createLimit },
+    async (req): Promise<GenerationDTO> => {
+      const g = await loadGeneration(req.params.id);
+      const captions = ctx.captions;
+      if (!captions) throw new HttpError(503, 'media_unavailable', 'Captions are not available on this server.');
+      if (g.status !== 'succeeded' || !g.finalVideoKey || !g.plan) {
+        throw conflict('Captions can be added once the video has finished generating.');
+      }
+      const keys = generationKeys(g.id);
+      const dir = await mkdtemp(join(tmpdir(), 'omni-captions-'));
+      try {
+        const clean = join(dir, 'clean.mp4');
+        await ctx.storage.downloadToFile(g.finalCleanKey ?? g.finalVideoKey, clean);
+        let part1DurationSec: number | null = null;
+        if (g.part1VideoKey) {
+          const part1 = join(dir, 'part1.mp4');
+          await ctx.storage.downloadToFile(g.part1VideoKey, part1);
+          part1DurationSec = (await ctx.media.probe(part1)).durationSec;
+        }
+        const output = join(dir, 'captioned.mp4');
+        const result = await captions.render({
+          input: clean,
+          output,
+          parts: g.plan.segments.map((s) => s.dialogue),
+          part1DurationSec,
+          workDir: dir,
+        });
+        if (!g.finalCleanKey) await ctx.storage.putFile(keys.finalClean, clean, 'video/mp4');
+        await ctx.storage.putFile(keys.final, output, 'video/mp4');
+        const updated = await ctx.repo.update(g.id, {
+          finalVideoKey: keys.final,
+          finalCleanKey: keys.finalClean,
+          captionEngine: result.engine,
+          settings: { ...g.settings, captions: true },
+        });
+        if (!updated) throw notFound();
+        await ctx.repo.addEvent(
+          g.id,
+          updated.stage,
+          'info',
+          `Captions added (${result.words.length} words, ${result.engine === 'pocketsphinx' ? 'timed to the voice' : 'estimated timing'})`,
+        );
+        return dtoFor(updated);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    },
+  );
+
   app.post<IdParams>('/api/generations/:id/cancel', async (req): Promise<GenerationDTO> => {
     const current = await loadGeneration(req.params.id);
     if (isTerminalStatus(current.status)) throw conflict(alreadyDone(current.status));
