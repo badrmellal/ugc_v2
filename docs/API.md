@@ -4,7 +4,7 @@ All endpoints are under `/api` and exchange JSON unless noted. Types referenced 
 
 Authentication: a session cookie (`omni_session`) set by `POST /api/auth/login`, or `Authorization: Bearer <token>` with one of `API_TOKENS`. Every endpoint except `/api/auth/*`, `/healthz` and `/readyz` requires authentication when auth is enabled; unauthenticated calls get `401`.
 
-Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "string", "details"?: any } }`.
+Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "string", "details"?: any } }`. `429` responses include a `Retry-After` header; `500` responses include `details.requestId` for log correlation.
 
 | Code                     | HTTP | Meaning                                                                         |
 | ------------------------ | ---- | ------------------------------------------------------------------------------- |
@@ -19,6 +19,8 @@ Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "st
 | `rate_limited`           | 429  | Too many requests                                                               |
 | `conflict`               | 409  | Action not allowed in the current state                                         |
 | `splitter_failed`        | 502  | Script split failed (only for `/api/plan`, generation falls back automatically) |
+| `range_not_satisfiable`  | 416  | Byte range outside the file (media routes)                                      |
+| `media_unavailable`      | 503  | Server-side image processing is unavailable (ffmpeg missing or timed out)       |
 | `internal_error`         | 500  | Unexpected error                                                                |
 
 ## Auth
@@ -34,7 +36,7 @@ Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "st
 ## Planning and estimates
 
 - `POST /api/plan` body `PlanRequest` → `ScriptPlan`. Runs the splitter (LLM, falling back to the deterministic splitter) and returns both parts with their final Omni prompts, so the user can review/edit before generating. Rate limited like creation.
-- `POST /api/estimate` body `EstimateRequest` → `CostBreakdown`.
+- `POST /api/estimate` body `EstimateRequest` → `CostBreakdown`. `settings.reinforceCharacterOnExtend` adds the second image input; `hasPlan: true` leaves out the splitter call (a reviewed split will be sent); `mode: "part2"` prices only the extension.
 
 ## Generations
 
@@ -45,7 +47,7 @@ Errors always use `ApiErrorBody`: `{ "error": { "code": "string", "message": "st
   → `202` with `GenerationDTO` (status `queued`). A provided `plan` is validated and marked `source: "user"`; the prompts are rebuilt server-side from its fields so the prompt format stays consistent.
 
 - `GET /api/generations?limit=20&cursor=...&status=succeeded` → `GenerationListResponse` (newest first, cursor pagination).
-- `GET /api/generations/:id` → `GenerationDTO` (includes the latest 200 events). The UI polls this every 2s while the job is active.
+- `GET /api/generations/:id` → `GenerationDTO` (includes the latest 200 events). The UI polls this every 2s while the job is active. For failed or canceled jobs `failedStage` names the pipeline stage that was running when it stopped.
 - `POST /api/generations/:id/regenerate` body `RegenerateRequest` → `202` `GenerationDTO` of the **new** generation (the character image is reused; `parentId` links to the source).
   - `mode: "full"`: new part 1 and part 2. Optional `script`, `settings`, `plan` edits.
   - `mode: "part2"`: reuses the source's part 1 interaction and video, re-runs only the extension. Requires the source to have a completed part 1 (`canRegeneratePart2`). Optional `part2` edits.
