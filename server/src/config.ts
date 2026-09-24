@@ -138,6 +138,12 @@ const EnvSchema = z.object({
   PRICING_SOURCE: z.string().default('Gemini API pricing for gemini-omni-1.1-flash (override via PRICE_* env vars)'),
 
   WEB_DIST_DIR: z.string().optional(),
+
+  // --- Media processing ---
+  FFMPEG_PATH: z.string().default('ffmpeg'),
+  FFPROBE_PATH: z.string().default('ffprobe'),
+  /** Max seconds for a single ffmpeg/ffprobe run (4K concat on a small CPU can be slow). */
+  MEDIA_TIMEOUT_SEC: numberWithDefault(600),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -203,6 +209,7 @@ export interface AppConfig {
     turnTextOutputTokens: number;
   };
   webDistDir: string | null;
+  media: { ffmpegPath: string; ffprobePath: string; timeoutMs: number };
 }
 
 export class ConfigError extends Error {
@@ -346,6 +353,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       turnTextOutputTokens: e.TURN_TEXT_OUTPUT_TOKENS,
     },
     webDistDir: e.WEB_DIST_DIR ?? null,
+    media: {
+      ffmpegPath: e.FFMPEG_PATH,
+      ffprobePath: e.FFPROBE_PATH,
+      timeoutMs: positive('MEDIA_TIMEOUT_SEC', e.MEDIA_TIMEOUT_SEC) * 1000,
+    },
   };
 }
 

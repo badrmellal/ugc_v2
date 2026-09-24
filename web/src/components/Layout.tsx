@@ -95,7 +95,7 @@ export function Layout() {
         Skip to content
       </a>
       <header className="sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur supports-[backdrop-filter]:bg-canvas/70">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-4 sm:gap-4 sm:px-6">
+        <div className="mx-auto flex h-14 max-w-7xl items-center gap-1.5 px-4 sm:gap-4 sm:px-6">
           <NavLink to="/" className="flex shrink-0 items-center gap-2 rounded-md font-semibold tracking-tight">
             <span className="flex size-7 items-center justify-center rounded-lg bg-accent text-accent-fg">
               <Clapperboard className="size-4" aria-hidden="true" />
@@ -103,17 +103,17 @@ export function Layout() {
             <span className="hidden sm:inline">Omni UGC Studio</span>
             <span className="sr-only sm:hidden">Omni UGC Studio</span>
           </NavLink>
-          <nav aria-label="Main" className="flex items-center gap-1">
+          <nav aria-label="Main" className="flex items-center gap-0.5 sm:gap-1">
             <NavLink to="/" end className={navClass}>
-              <Plus className="size-4" aria-hidden="true" />
+              <Plus className="hidden size-4 sm:block" aria-hidden="true" />
               Create
             </NavLink>
             <NavLink to="/history" className={navClass}>
-              <GalleryVerticalEnd className="size-4" aria-hidden="true" />
+              <GalleryVerticalEnd className="hidden size-4 sm:block" aria-hidden="true" />
               History
             </NavLink>
           </nav>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
             {config.data?.mock && <MockBadge />}
             {config.data && <BudgetPill budget={config.data.budget} />}
             {session.data?.authRequired && <SignOutButton session={session.data} />}

@@ -68,7 +68,7 @@ export function SegmentedControl<T extends string>({
             />
             <span className={cn('flex min-w-0 items-center gap-2', layout === 'cards' && 'text-sm font-medium')}>
               {option.icon}
-              <span className="truncate">{option.label}</span>
+              <span className={cn(layout === 'segmented' && 'truncate')}>{option.label}</span>
             </span>
             {option.description && layout === 'cards' && (
               <span className="text-xs leading-snug text-muted">{option.description}</span>

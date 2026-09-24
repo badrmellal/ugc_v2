@@ -10,7 +10,7 @@ type PlayerSource = Pick<
 
 function PhoneFrame({ children, label }: { children: ReactNode; label?: string }) {
   return (
-    <figure className="mx-auto w-full max-w-[320px]">
+    <figure className="mx-auto w-full max-w-[280px] sm:max-w-[320px]">
       <div className="relative aspect-[9/16] w-full overflow-hidden rounded-[2rem] border-[6px] border-frame bg-black shadow-xl">
         {children}
       </div>
@@ -53,9 +53,6 @@ export function PhonePlayer({ generation: g }: { generation: PlayerSource }) {
           className="size-full bg-black object-contain"
           aria-label={`${g.title}, part 1 preview, first 10 seconds`}
         />
-        <span className="pointer-events-none absolute top-3 left-3 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-white">
-          Part 1 preview (0-10s)
-        </span>
       </PhoneFrame>
     );
   }

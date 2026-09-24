@@ -28,7 +28,7 @@ export interface ParsedScript {
 }
 
 const LABEL =
-  /^(?:hook|intro|introduction|body|main|cta|call to action|outro|close|closing|ending|scene\s*\d+|shot\s*\d+|part\s*\d+|beat\s*\d+|line\s*\d+|vo|v\.o\.|voice ?over|narrator|narration|speaker|creator|host|presenter|talent|dialogue|script|audio)\s*(?:\([^)]{0,30}\))?\s*[:\-]\s*/i;
+  /^(?:hook|intro|introduction|body|main|cta|call to action|outro|close|closing|ending|scene\s*\d+|shot\s*\d+|part\s*\d+|beat\s*\d+|line\s*\d+|vo|v\.o\.|voice ?over|narrator|narration|speaker|creator|host|presenter|talent|dialogue|script|audio)\s*(?:\([^)]{0,30}\))?\s*[:-]\s*/i;
 const CAPS_LABEL = /^[A-Z][A-Z0-9 ]{1,24}:\s+/;
 const HEADING_ONLY = /^(?:scene|shot|part|beat)\s*\d+\s*:?$/i;
 const TIMECODE_ONLY =
@@ -38,7 +38,7 @@ const TIMECODE_PREFIX =
   /^(?:\d{1,2}:\d{2}\s*(?:-|\u2013)\s*\d{1,2}:\d{2}|\d{1,2}(?:\.\d)?s?\s*(?:-|\u2013)\s*\d{1,2}(?:\.\d)?s)\s*[:-]?\s+/i;
 const DIRECTION_CUE =
   /^(?:smil|laugh|chuckl|giggl|paus|beat\b|hold|point|show|pick|lift|rais|turn|look|lean|nod|shrug|gestur|wink|sigh|gasp|whisper|excited|sarcastic|soft|cut\b|b-?roll|on[- ]?screen|text\b|caption|sfx|sound|music|zoom|close[- ]?up|camera|tap|sip|drink|appl|open|walk|sit|stand|wave|clap|hand|to camera|tone|holds?\b|reveal|demonstrat|puts?\b|places?\b|grabs?\b|touch|shak|squeez|pour|spray|rub|mix|stir|writ|draw|visual|graphic|shot\b|scene\b)/i;
-const ON_SCREEN = /^(?:on[- ]?screen(?:\s+text)?|text(?:\s+on\s+screen)?|caption|title|super|lower third)\s*[:\-]\s*(.+)$/i;
+const ON_SCREEN = /^(?:on[- ]?screen(?:\s+text)?|text(?:\s+on\s+screen)?|caption|title|super|lower third)\s*[:-]\s*(.+)$/i;
 
 function stripOuterQuotes(s: string): string {
   const t = s.trim();

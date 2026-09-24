@@ -75,7 +75,7 @@ export function ImageDropZone({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-baseline justify-between gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
         <span id={`${id}-label`} className="text-sm font-medium">
           Character image
         </span>
